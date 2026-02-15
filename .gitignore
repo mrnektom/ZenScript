@@ -5,3 +5,5 @@ build/
 build-*/
 docgen_tmp/
 .zbscanhelper.zig
+node_modules/
+dist/

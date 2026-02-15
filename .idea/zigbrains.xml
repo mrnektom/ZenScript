@@ -35,6 +35,17 @@
       "imports": []
     },
     {
+      "root": "src/nodemodule.zig",
+      "public": false,
+      "imports": [
+        {
+          "name": "napi",
+          "owner": 1,
+          "module": 0
+        }
+      ]
+    },
+    {
       "root": "src/main.zig",
       "public": false,
       "imports": [
@@ -46,9 +57,189 @@
       ]
     }
   ],
+  "dependencies": [
+    {
+      "project": 1,
+      "lazy": false
+    },
+    {
+      "project": 3,
+      "lazy": false
+    }
+  ]
+}]]><![CDATA[{
+  "name": "napi",
+  "version": "0.2.0",
+  "path": "/home/nektom/.cache/zig/p/napi-0.2.0-wOM5BQ6GAADgWsxC0vMPcrXDhTuT7XPgWOw53N8fFIxh",
+  "steps": [
+    {
+      "name": "install",
+      "description": "Copy build artifacts to prefix path",
+      "kind": "install_artifact"
+    },
+    {
+      "name": "uninstall",
+      "description": "Remove build artifacts from prefix path",
+      "kind": "uninstall"
+    },
+    {
+      "name": "docs",
+      "description": "Generate docs",
+      "kind": "install_dir"
+    }
+  ],
+  "modules": [
+    {
+      "root": "src/root.zig",
+      "public": true,
+      "imports": [
+        {
+          "name": "napi",
+          "owner": 1,
+          "module": 0
+        }
+      ]
+    },
+    {
+      "root": "examples/hello.zig",
+      "public": false,
+      "imports": [
+        {
+          "name": "napi",
+          "owner": 1,
+          "module": 0
+        }
+      ]
+    },
+    {
+      "root": "examples/function.zig",
+      "public": false,
+      "imports": [
+        {
+          "name": "napi",
+          "owner": 1,
+          "module": 0
+        }
+      ]
+    },
+    {
+      "root": "tests/main.zig",
+      "public": false,
+      "imports": [
+        {
+          "name": "napi",
+          "owner": 1,
+          "module": 0
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "project": 2,
+      "lazy": false
+    }
+  ]
+}]]><![CDATA[{
+  "name": "napi_headers",
+  "version": null,
+  "path": "/home/nektom/.cache/zig/p/N-V-__8AAASNAQA0UI0mvQk4LyFEhdFuFBPgH8HSokdFFpnz",
+  "steps": [
+    {
+      "name": "install",
+      "description": "Copy build artifacts to prefix path",
+      "kind": "uninstall"
+    },
+    {
+      "name": "uninstall",
+      "description": "Remove build artifacts from prefix path",
+      "kind": "uninstall"
+    }
+  ],
+  "modules": [],
+  "dependencies": []
+}]]><![CDATA[{
+  "name": "llvm_zig",
+  "version": "1.0.0",
+  "path": "/home/nektom/.cache/zig/p/llvm_zig-1.0.0-IXgkxLRjBADjVMy_FbE6b-jOjr-CB-Q1iOl-xCQk9l4Q",
+  "steps": [
+    {
+      "name": "install",
+      "description": "Copy build artifacts to prefix path",
+      "kind": "uninstall"
+    },
+    {
+      "name": "uninstall",
+      "description": "Remove build artifacts from prefix path",
+      "kind": "uninstall"
+    },
+    {
+      "name": "test",
+      "description": "Run LLVM-binding tests",
+      "kind": "run"
+    }
+  ],
+  "modules": [
+    {
+      "root": "src/llvm-bindings.zig",
+      "public": true,
+      "imports": []
+    },
+    {
+      "root": "src/clang.zig",
+      "public": true,
+      "imports": []
+    },
+    {
+      "root": "src/llvm-bindings.zig",
+      "public": false,
+      "imports": [
+        {
+          "name": "llvm",
+          "owner": 3,
+          "module": 0
+        }
+      ]
+    },
+    {
+      "root": "src/clang.zig",
+      "public": false,
+      "imports": [
+        {
+          "name": "clang",
+          "owner": 3,
+          "module": 1
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "project": 4,
+      "lazy": false
+    }
+  ]
+}]]><![CDATA[{
+  "name": "test_runner",
+  "version": null,
+  "path": "/home/nektom/.cache/zig/p/N-V-__8AAHMkAAC4CUVVTX0UMBJXtfOubskbF9EJ7X6qAGYR",
+  "steps": [
+    {
+      "name": "install",
+      "description": "Copy build artifacts to prefix path",
+      "kind": "uninstall"
+    },
+    {
+      "name": "uninstall",
+      "description": "Remove build artifacts from prefix path",
+      "kind": "uninstall"
+    }
+  ],
+  "modules": [],
   "dependencies": []
 }]]></list>
     </option>
   </component>
+  <component name="Commenter" state="Alternative" />
   <component name="ZigToolchain" toolchain="b5ab0f79-d666-471f-99e6-a6d318504225" />
 </project>

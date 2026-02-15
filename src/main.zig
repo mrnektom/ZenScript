@@ -1,10 +1,14 @@
 const std = @import("std");
 const ZenScript = @import("ZenScript");
+const Args = @import("args/Args.zig");
+const Tokenizer = @import("tokens/Tokenizer.zig");
+const Pipline = @import("Pipline.zig");
 
 pub fn main() !void {
-    // Prints to stderr, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-    try ZenScript.bufferedPrint();
+    const args = try Args.collectArgs();
+
+    var pipline = Pipline.create();
+    try pipline.compile(args.entryPoint);
 }
 
 test "simple test" {

@@ -1,0 +1,36 @@
+{
+  "name": "zenscript",
+  "version": "1.0.0",
+  "description": "ZenScript compiler",
+  "keywords": [
+    "zenscript",
+    "compiler",
+    "vite",
+    "plugin"
+  ],
+  "homepage": "https://github.com/mrnektom/ZenScript#readme",
+  "bugs": {
+    "url": "https://github.com/mrnektom/ZenScript/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mrnektom/ZenScript.git"
+  },
+  "license": "ISC",
+  "author": "Michail Koshikov",
+  "main": "index.js",
+  "directories": {
+    "example": "examples"
+  },
+  "scripts": {
+    "test": "node index.js",
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "node-addon-api": "^8.5.0",
+    "zig-build": "^0.3.0"
+  },
+  "workspaces": [
+    "packages/vite-plugin"
+  ]
+}
