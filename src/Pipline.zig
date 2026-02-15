@@ -3,6 +3,7 @@ const Tokenizer = @import("tokens/Tokenizer.zig");
 const Parser = @import("Parser.zig");
 const Analyzer = @import("analyze/analyzer.zig");
 const Self = @This();
+const IRGen = @import("ir/IRGen.zig");
 
 pub fn create() Self {
     return Self{};
@@ -26,11 +27,16 @@ pub fn compile(self: *Self, filePath: []const u8) !void {
     defer module.deinit(allocator);
     var symTable = try Analyzer.analyze(module, allocator);
     defer symTable.deinit();
+    const ir = try IRGen.generateIr(&module, allocator);
+    defer {
+        for (ir) |value| value.deinit(allocator);
+        allocator.free(ir);
+    }
 
-    var iter = symTable.keyIterator();
+    // var iter = symTable.keyIterator();
 
-    std.debug.print("Table keys\n", .{});
-    while (iter.next()) |key| {
-        std.debug.print("{s}: {any}\n", .{ key.*, symTable.get(key.*) });
+    std.debug.print("IR\n", .{});
+    for (ir) |instruction| {
+        std.debug.print("Instruction: {f}\n", .{instruction});
     }
 }

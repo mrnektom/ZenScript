@@ -58,7 +58,7 @@ fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) Symbol.ZSType {
     };
 }
 
-fn analyzeVariable(self: *Self, variable: ast.stmt.Var) Symbol {
+fn analyzeVariable(self: *Self, variable: ast.stmt.ZSVar) Symbol {
     const stype = self.analyzeExpr(variable.expr);
     return .{ .name = variable.name, .assignable = variable.type == .Let, .signature = stype };
 }

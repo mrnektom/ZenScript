@@ -11,6 +11,5 @@ pub const VariableType = enum {
 };
 
 pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
-    std.debug.print("Deinit: {s}\n", .{@typeName(@This())});
     self.expr.deinit(allocator);
 }

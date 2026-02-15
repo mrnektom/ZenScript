@@ -83,7 +83,7 @@ fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
     return Error.UnknownToken;
 }
 
-fn nextVar(self: *Self) Error!?ast.stmt.Var {
+fn nextVar(self: *Self) Error!?ast.stmt.ZSVar {
     const varType = block: {
         if (try self.checkToken("const")) break :block VarType.Const;
         if (try self.checkToken("let")) break :block VarType.Let;
@@ -94,7 +94,7 @@ fn nextVar(self: *Self) Error!?ast.stmt.Var {
     try self.expectToken("=");
     const expr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
 
-    return ast.stmt.Var{ .type = varType, .name = name, .expr = expr };
+    return ast.stmt.ZSVar{ .type = varType, .name = name, .expr = expr };
 }
 
 fn nextCall(self: *Self, subject: ast.expr.ZSExpr) Error!?ast.expr.ZSCall {
@@ -110,7 +110,6 @@ fn nextCall(self: *Self, subject: ast.expr.ZSExpr) Error!?ast.expr.ZSCall {
         }
         break;
     }
-    std.debug.print("{}\n", .{args});
     try self.expectToken(")");
     const expr = try self.allocator.alloc(ast.expr.ZSExpr, 1);
     expr[0] = subject;
@@ -156,7 +155,6 @@ fn nextString(self: *Self) !?ast.expr.ZSString {
     };
 
     const result = ast.expr.ZSString{ .value = value };
-    std.debug.print("{}\n", .{result});
     return result;
 }
 

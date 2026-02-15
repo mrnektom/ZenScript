@@ -36,9 +36,7 @@ pub fn exitScope(self: *Self) !*SymbolTable {
 pub fn put(self: *Self, symbol: Symbol) !void {
     var table = self.list.getLastOrNull() orelse return Error.NoTableInStack;
 
-    std.debug.print("pre put {s}\n", .{symbol.name});
     try table.put(symbol.name, symbol);
-    std.debug.print("post put {s}\n", .{symbol.name});
 }
 
 pub fn get(self: *Self, name: []const u8) ?Symbol {
@@ -48,9 +46,7 @@ pub fn get(self: *Self, name: []const u8) ?Symbol {
         if (index >= 0) {
             const table = self.list.items[index];
 
-            std.debug.print("pre get {s}\n", .{name});
             if (table.get(name)) |sym| {
-                std.debug.print("post get {s}\n", .{name});
                 return sym;
             }
             if (index == 0) return null;

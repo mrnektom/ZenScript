@@ -6,7 +6,6 @@ pub const ZSModule = struct {
     ast: []ast.ZSAstNode,
 
     pub fn deinit(self: *const ZSModule, allocator: std.mem.Allocator) void {
-        std.debug.print("Deinit: {s}\n", .{@typeName(@This())});
         for (self.ast) |node| {
             node.deinit(allocator);
         }

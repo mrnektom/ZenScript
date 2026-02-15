@@ -14,7 +14,6 @@ pub const ZSAstNode = union(ZSAstType) {
     expr: expr.ZSExpr,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
-        std.debug.print("Deinit: {s}\n", .{@typeName(@This())});
         switch (self.*) {
             .expr => self.expr.deinit(allocator),
             .stmt => self.stmt.deinit(allocator),
