@@ -11,17 +11,23 @@ const Self = @This();
 tokenizer: Tokenizer,
 peekedToken: ?Token,
 allocator: std.mem.Allocator,
+filename: []const u8,
+source: []const u8,
 
-const Error = error{
-    UnexpectedTokenType,
-    UnexpectedToken,
-} || Tokenizer.Error || std.mem.Allocator.Error;
+const Error = error{ UnexpectedTokenType, UnexpectedToken, NotShiftedToken } || Tokenizer.Error || std.mem.Allocator.Error;
 
-pub fn create(tokenizer: Tokenizer, allocator: std.mem.Allocator) !Self {
+pub fn create(
+    allocator: std.mem.Allocator,
+    tokenizer: Tokenizer,
+    filemane: []const u8,
+    source: []const u8,
+) !Self {
     return .{
         .tokenizer = tokenizer,
         .peekedToken = null,
         .allocator = allocator,
+        .filename = filemane,
+        .source = source,
     };
 }
 
@@ -33,9 +39,14 @@ pub fn parse(self: *Self, allocator: std.mem.Allocator) !ZSModule {
 
     while (true) {
         const node = self.nextNode() catch |err| break try self.printError(err);
+
         if (node) |n| {
             try astNodes.append(allocator, n);
         } else break;
+    }
+    if (self.peekedToken) |tok| {
+        std.debug.print("Token: {any}\n", .{tok});
+        return Error.NotShiftedToken;
     }
 
     const astItems = try allocator.alloc(ZSAstNode, astNodes.items.len);
@@ -44,6 +55,8 @@ pub fn parse(self: *Self, allocator: std.mem.Allocator) !ZSModule {
     return .{
         .ast = astItems,
         .deps = deps,
+        .filename = self.filename,
+        .source = self.source,
     };
 }
 
@@ -110,16 +123,30 @@ fn nextCall(self: *Self, subject: ast.expr.ZSExpr) Error!?ast.expr.ZSCall {
         }
         break;
     }
+    const start = subject.start();
+    const end = (try self.peekToken()).endPos;
     try self.expectToken(")");
     const expr = try self.allocator.alloc(ast.expr.ZSExpr, 1);
     expr[0] = subject;
-    return ast.expr.ZSCall{ .subject = &expr[0], .arguments = try self.allocator.dupe(ast.expr.ZSExpr, args.items) };
+    return ast.expr.ZSCall{
+        .subject = &expr[0],
+        .arguments = try self.allocator.dupe(ast.expr.ZSExpr, args.items),
+        .startPos = start,
+        .endPos = end,
+    };
 }
 
 fn nextReference(self: *Self) !?ast.expr.ZSReference {
     if (!self.checkIndent()) return null;
-    const name = try self.nextIdent() orelse return null;
-    return ast.expr.ZSReference{ .name = name };
+    const token = try self.peekToken();
+    if (token.type != .ident) return Error.UnexpectedTokenType;
+    self.shiftToken();
+    const name = token.value;
+    return ast.expr.ZSReference{
+        .name = name,
+        .startPos = token.startPos,
+        .endPos = token.endPos,
+    };
 }
 
 fn checkIndent(self: *Self) bool {
@@ -139,22 +166,32 @@ fn nextNumber(self: *Self) Error!?ast.expr.ZSNumber {
     const token = try self.peekToken();
     if (token.type != .numeric) return null;
     self.shiftToken();
-    return ast.expr.ZSNumber{ .value = token.value };
+    return ast.expr.ZSNumber{
+        .value = token.value,
+        .startPos = token.startPos,
+        .endPos = token.endPos,
+    };
 }
 
 fn nextString(self: *Self) !?ast.expr.ZSString {
     const token = try self.peekToken();
     if (token.type != .string) return null;
     self.shiftToken();
-    const value = blk: {
+    const value: [:0]const u8 = blk: {
         if (std.mem.startsWith(u8, token.value, "\"") and std.mem.endsWith(u8, token.value, "\"")) {
-            break :blk token.value[1..(token.value.len - 1)];
+            const slice = token.value[1..(token.value.len - 1)];
+            const cStr = try self.allocator.dupeZ(u8, slice);
+            break :blk cStr;
         }
 
         return Error.UnexpectedToken;
     };
 
-    const result = ast.expr.ZSString{ .value = value };
+    const result = ast.expr.ZSString{
+        .value = value,
+        .startPos = token.startPos,
+        .endPos = token.endPos,
+    };
     return result;
 }
 

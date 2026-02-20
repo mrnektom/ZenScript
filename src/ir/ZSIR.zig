@@ -1,12 +1,19 @@
 const std = @import("std");
 const ZSIRType = enum { assign, call };
 
+pub const ZSIRInstructions = struct {
+    instructions: []ZSIR,
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        for (self.instructions) |value| value.deinit(allocator);
+        allocator.free(self.instructions);
+    }
+};
+
 pub const ZSIR = union(ZSIRType) {
     assign: ZSIRAssign,
     call: ZSIRCall,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
-        std.debug.print("Deinit: {s}\n", .{@typeName(@This())});
         switch (self.*) {
             .assign => {
                 self.assign.deinit(allocator);
@@ -28,8 +35,8 @@ pub const ZSIR = union(ZSIRType) {
 
 const ZSIRValueType = enum { number, string };
 pub const ZSIRValue = union(ZSIRValueType) {
-    number: []const u8,
-    string: []const u8,
+    number: i32,
+    string: [:0]const u8,
 
     pub fn format(
         self: @This(),
@@ -48,7 +55,6 @@ pub const ZSIRAssign = struct {
     value: ZSIRValue,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
-        std.debug.print("Deinit: {s}\n", .{@typeName(@This())});
         allocator.free(self.varName);
     }
 
@@ -66,9 +72,7 @@ pub const ZSIRCall = struct {
     argNames: [][]const u8,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
-        std.debug.print("Deinit: {s}\n", .{@typeName(@This())});
         allocator.free(self.resultName);
-        // allocator.free(self.fnName);
         allocator.free(self.argNames);
     }
 

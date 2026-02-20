@@ -147,5 +147,13 @@ pub fn next(self: *Tokenizer) Error!?ZSToken {
     if (tokenType == .whitespace) {
         return self.next();
     }
-    return ZSToken{ .type = tokenType, .startPos = startPos, .endPos = endPos, .startLine = startLine, .endLine = endLine, .value = value };
+    return ZSToken{
+        .type = tokenType,
+        .startPos = startPos,
+        .endPos = endPos,
+        .startLine = startLine,
+        .endLine = endLine,
+        .value = value,
+        .source = self.input,
+    };
 }

@@ -4,13 +4,13 @@ const zsm = @import("../ast/zs_module.zig");
 const ast = @import("../ast/ast_node.zig");
 const Self = @This();
 
-pub const Error = error{} || std.mem.Allocator.Error;
+pub const Error = error{} || std.mem.Allocator.Error || std.fmt.ParseIntError;
 
 instructions: *std.ArrayList(ir.ZSIR),
 allocator: std.mem.Allocator,
 nameCount: usize = 0,
 
-pub fn generateIr(module: *const zsm.ZSModule, allocator: std.mem.Allocator) ![]ir.ZSIR {
+pub fn generateIr(module: *const zsm.ZSModule, allocator: std.mem.Allocator) !ir.ZSIRInstructions {
     var instructions = try std.ArrayList(ir.ZSIR).initCapacity(allocator, 5);
     defer instructions.deinit(allocator);
 
@@ -19,7 +19,7 @@ pub fn generateIr(module: *const zsm.ZSModule, allocator: std.mem.Allocator) ![]
     for (module.ast) |node| {
         _ = try irGen.generateNode(node);
     }
-    return allocator.dupe(ir.ZSIR, instructions.items);
+    return .{ .instructions = try allocator.dupe(ir.ZSIR, instructions.items) };
 }
 
 fn generateNode(self: *Self, node: ast.ZSAstNode) ![]const u8 {
@@ -76,7 +76,7 @@ fn generateVariable(self: *Self, variable: ast.stmt.ZSVar) ![]const u8 {
 }
 
 fn generateNumberAssign(self: *Self, number: ast.expr.ZSNumber) Error![]const u8 {
-    return self.generateAssign(ir.ZSIRValue{ .number = number.value });
+    return self.generateAssign(ir.ZSIRValue{ .number = try std.fmt.parseInt(i32, number.value, 10) });
 }
 
 fn generateStringAssign(self: *Self, string: ast.expr.ZSString) Error![]const u8 {

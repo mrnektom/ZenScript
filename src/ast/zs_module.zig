@@ -4,6 +4,8 @@ const ast = @import("ast_node.zig");
 pub const ZSModule = struct {
     deps: []ZSModuleDep,
     ast: []ast.ZSAstNode,
+    filename: []const u8,
+    source: []const u8,
 
     pub fn deinit(self: *const ZSModule, allocator: std.mem.Allocator) void {
         for (self.ast) |node| {

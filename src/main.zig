@@ -3,6 +3,7 @@ const ZenScript = @import("ZenScript");
 const Args = @import("args/Args.zig");
 const Tokenizer = @import("tokens/Tokenizer.zig");
 const Pipline = @import("Pipline.zig");
+const llvm = @import("codegen/LLVMCodeGen.zig");
 
 pub fn main() !void {
     const args = try Args.collectArgs();
