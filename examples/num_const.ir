@@ -1,0 +1,17 @@
+; ModuleID = 'zs_module'
+source_filename = "zs_module"
+
+define void @init() {
+entry:
+  %x = alloca i32, align 4
+  store i32 10, ptr %x, align 4
+  %strVal = alloca [5 x i8], align 1
+  store [5 x i8] c"hello", ptr %strVal, align 1
+  %x1 = alloca { i32, ptr }, align 8
+  store { i32 } { i32 5 }, ptr %x1, align 4
+  %arg = load { i32, ptr }, ptr %x1, align 8
+  call void @print({ i32, ptr } %arg)
+  ret void
+}
+
+declare void @print({ i32, ptr })
