@@ -79,6 +79,7 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
     return switch (expr) {
         .number => self.generateNumberAssign(expr.number),
         .string => self.generateStringAssign(expr.string),
+        .boolean => self.generateBooleanAssign(expr.boolean),
         .call => self.generateCall(expr.call),
         .reference => self.generateReference(expr.reference),
         .if_expr => self.generateIfExpr(expr.if_expr),
@@ -316,6 +317,10 @@ fn generateNumberAssign(self: *Self, number: ast.expr.ZSNumber) Error![]const u8
 
 fn generateStringAssign(self: *Self, string: ast.expr.ZSString) Error![]const u8 {
     return self.generateAssign(ir.ZSIRValue{ .string = string.value });
+}
+
+fn generateBooleanAssign(self: *Self, boolean: ast.expr.ZSBoolean) Error![]const u8 {
+    return self.generateAssign(ir.ZSIRValue{ .boolean = boolean.value });
 }
 
 fn generateAssign(self: *Self, value: ir.ZSIRValue) Error![]const u8 {

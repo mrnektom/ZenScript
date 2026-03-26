@@ -290,14 +290,12 @@ fn generateCompare(
     else
         .LLVMIntNE;
 
-    // Result is i1, extend to i32 for storage
     const cmpResult = core.LLVMBuildICmp(builder, pred, lhsVal, rhsVal, "cmp");
-    const extended = core.LLVMBuildZExt(builder, cmpResult, core.LLVMInt32Type(), "cmpext");
 
-    // Store result
-    const ptr = core.LLVMBuildAlloca(builder, core.LLVMInt32Type(), "cmpres");
-    _ = core.LLVMBuildStore(builder, extended, ptr);
-    try locals.put(cmp.resultName, LocalVar{ .ptr = ptr, .ty = core.LLVMInt32Type() });
+    // Store result as i1 (boolean)
+    const ptr = core.LLVMBuildAlloca(builder, core.LLVMInt1Type(), "cmpres");
+    _ = core.LLVMBuildStore(builder, cmpResult, ptr);
+    try locals.put(cmp.resultName, LocalVar{ .ptr = ptr, .ty = core.LLVMInt1Type() });
 
     _ = allocator;
 }
@@ -306,6 +304,7 @@ fn generateAssign(builder: types.LLVMBuilderRef, locals: *std.StringHashMap(Loca
     const ty = switch (assign.value) {
         .number => core.LLVMInt32Type(),
         .string => getStringType(),
+        .boolean => core.LLVMInt1Type(),
     };
 
     const value = try getValue(builder, &assign.value);
@@ -361,6 +360,8 @@ fn generateCall(
 fn mapType(name: []const u8) types.LLVMTypeRef {
     if (std.mem.eql(u8, name, "number")) {
         return core.LLVMInt32Type();
+    } else if (std.mem.eql(u8, name, "boolean")) {
+        return core.LLVMInt1Type();
     } else if (std.mem.eql(u8, name, "string")) {
         return getStringType();
     } else if (std.mem.eql(u8, name, "c_string")) {
@@ -381,6 +382,7 @@ fn getValue(builder: types.LLVMBuilderRef, value: *const ir.ZSIRValue) !types.LL
     return switch (value.*) {
         .number => core.LLVMConstInt(core.LLVMInt32Type(), @intCast(value.number), 1),
         .string => getStringValue(builder, value.string),
+        .boolean => core.LLVMConstInt(core.LLVMInt1Type(), if (value.boolean) 1 else 0, 0),
     };
 }
 

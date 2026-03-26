@@ -87,6 +87,7 @@ fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
         if (try self.nextReturn()) |r| break :blk ast.expr.ZSExpr{ .return_expr = r };
         if (try self.nextBlock()) |b| break :blk ast.expr.ZSExpr{ .block = b };
         if (try self.nextNumber()) |n| break :blk ast.expr.ZSExpr{ .number = n };
+        if (try self.nextBoolean()) |b| break :blk ast.expr.ZSExpr{ .boolean = b };
         if (try self.nextReference()) |r| break :blk ast.expr.ZSExpr{ .reference = r };
         if (try self.nextString()) |s| break :blk ast.expr.ZSExpr{ .string = s };
         return null;
@@ -343,6 +344,20 @@ fn nextCall(self: *Self, subject: ast.expr.ZSExpr) Error!?ast.expr.ZSCall {
         .startPos = start,
         .endPos = end,
     };
+}
+
+fn nextBoolean(self: *Self) Error!?ast.expr.ZSBoolean {
+    const token = self.peekToken() catch return null;
+    if (token.type != .ident) return null;
+    if (std.mem.eql(u8, token.value, "true")) {
+        self.shiftToken();
+        return ast.expr.ZSBoolean{ .value = true, .startPos = token.startPos, .endPos = token.endPos };
+    }
+    if (std.mem.eql(u8, token.value, "false")) {
+        self.shiftToken();
+        return ast.expr.ZSBoolean{ .value = false, .startPos = token.startPos, .endPos = token.endPos };
+    }
+    return null;
 }
 
 fn nextReference(self: *Self) !?ast.expr.ZSReference {

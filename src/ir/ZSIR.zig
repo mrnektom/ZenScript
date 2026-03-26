@@ -42,10 +42,11 @@ pub const ZSIR = union(ZSIRType) {
     }
 };
 
-const ZSIRValueType = enum { number, string };
+const ZSIRValueType = enum { number, string, boolean };
 pub const ZSIRValue = union(ZSIRValueType) {
     number: i32,
     string: [:0]const u8,
+    boolean: bool,
 
     pub fn format(
         self: @This(),

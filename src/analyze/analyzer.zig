@@ -99,6 +99,7 @@ fn typeToString(zsType: Symbol.ZSType) []const u8 {
     return switch (zsType) {
         .number => "number",
         .string => "string",
+        .boolean => "boolean",
         .function => "function",
         .unknown => "unknown",
     };
@@ -247,6 +248,7 @@ fn resolveTypeAnnotation(ret: ?ast.ZSType) Symbol.ZSType {
             .reference => |ref| {
                 if (std.mem.eql(u8, ref, "number")) return .number;
                 if (std.mem.eql(u8, ref, "string")) return .string;
+                if (std.mem.eql(u8, ref, "boolean")) return .boolean;
                 return .unknown;
             },
         };
@@ -283,6 +285,7 @@ fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) !Symbol.ZSType {
     return switch (expr) {
         .number => Symbol.ZSType.number,
         .string => Symbol.ZSType.string,
+        .boolean => Symbol.ZSType.boolean,
         .call => self.analyzeCall(expr.call),
         .reference => self.analyzeReference(expr.reference),
         .if_expr => self.analyzeIfExpr(expr.if_expr),
@@ -444,7 +447,7 @@ fn analyzeIfExpr(self: *Self, ifExpr: ast.expr.ZSIfExpr) Error!Symbol.ZSType {
 fn analyzeBinary(self: *Self, binary: ast.expr.ZSBinary) Error!Symbol.ZSType {
     _ = try self.analyzeExpr(binary.lhs.*);
     _ = try self.analyzeExpr(binary.rhs.*);
-    return Symbol.ZSType.number; // comparison result is a number (0 or 1)
+    return Symbol.ZSType.boolean;
 }
 
 fn analyzeBlock(self: *Self, block: ast.expr.ZSBlock) Error!Symbol.ZSType {

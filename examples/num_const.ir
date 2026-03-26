@@ -3,40 +3,53 @@ source_filename = "zs_module"
 
 define void @init() {
 entry:
+  %x = alloca i1, align 1
+  store i1 true, ptr %x, align 1
+  %x1 = alloca i1, align 1
+  store i1 false, ptr %x1, align 1
   %call_result = call i32 @get_ten()
   %callres = alloca i32, align 4
   store i32 %call_result, ptr %callres, align 4
   %arg = load i32, ptr %callres, align 4
-  %call_result1 = call i32 @check(i32 %arg)
-  %callres2 = alloca i32, align 4
-  store i32 %call_result1, ptr %callres2, align 4
-  %arg3 = load i32, ptr %callres2, align 4
-  call void @print_number(i32 %arg3)
-  %x = alloca i32, align 4
-  store i32 1, ptr %x, align 4
-  %x4 = alloca i32, align 4
-  store i32 2, ptr %x4, align 4
-  %arg5 = load i32, ptr %x, align 4
-  %arg6 = load i32, ptr %x4, align 4
-  %call_result7 = call i32 @add__number_number(i32 %arg5, i32 %arg6)
-  %callres8 = alloca i32, align 4
-  store i32 %call_result7, ptr %callres8, align 4
-  %arg9 = load i32, ptr %callres8, align 4
-  call void @print_number(i32 %arg9)
-  %x10 = alloca i32, align 4
-  store i32 5, ptr %x10, align 4
-  %arg11 = load i32, ptr %x10, align 4
-  %call_result12 = call i32 @add__number(i32 %arg11)
-  %callres13 = alloca i32, align 4
-  store i32 %call_result12, ptr %callres13, align 4
-  %arg14 = load i32, ptr %callres13, align 4
-  call void @print_number(i32 %arg14)
+  %call_result2 = call i32 @check(i32 %arg)
+  %callres3 = alloca i32, align 4
+  store i32 %call_result2, ptr %callres3, align 4
+  %arg4 = load i32, ptr %callres3, align 4
+  call void @print__number(i32 %arg4)
+  %x5 = alloca i32, align 4
+  store i32 1, ptr %x5, align 4
+  %x6 = alloca i32, align 4
+  store i32 2, ptr %x6, align 4
+  %arg7 = load i32, ptr %x5, align 4
+  %arg8 = load i32, ptr %x6, align 4
+  %call_result9 = call i32 @add__number_number(i32 %arg7, i32 %arg8)
+  %callres10 = alloca i32, align 4
+  store i32 %call_result9, ptr %callres10, align 4
+  %arg11 = load i32, ptr %callres10, align 4
+  call void @print__number(i32 %arg11)
+  %x12 = alloca i32, align 4
+  store i32 5, ptr %x12, align 4
+  %arg13 = load i32, ptr %x12, align 4
+  %call_result14 = call i32 @add__number(i32 %arg13)
+  %callres15 = alloca i32, align 4
+  store i32 %call_result14, ptr %callres15, align 4
+  %arg16 = load i32, ptr %callres15, align 4
+  call void @print__number(i32 %arg16)
   ret void
 }
 
 declare void @print({ i32, ptr })
 
 declare void @print_number(i32)
+
+define void @print__number(i32 %0) {
+entry:
+  %n = alloca i32, align 4
+  store i32 %0, ptr %n, align 4
+  %arg = load i32, ptr %n, align 4
+  call void @print_number(i32 %arg)
+  ret void
+}
 
 define i32 @get_ten() {
 entry:
@@ -55,12 +68,11 @@ entry:
   %lhs = load i32, ptr %a, align 4
   %rhs = load i32, ptr %x, align 4
   %cmp = icmp eq i32 %lhs, %rhs
-  %cmpext = zext i1 %cmp to i32
-  %cmpres = alloca i32, align 4
-  store i32 %cmpext, ptr %cmpres, align 4
-  %cond = load i32, ptr %cmpres, align 4
+  %cmpres = alloca i1, align 1
+  store i1 %cmp, ptr %cmpres, align 1
+  %cond = load i1, ptr %cmpres, align 1
   %ifres = alloca i32, align 4
-  %condbool = icmp ne i32 %cond, 0
+  %condbool = icmp ne i1 %cond, false
   br i1 %condbool, label %then, label %else
 
 then:                                             ; preds = %entry

@@ -1,6 +1,8 @@
 external fn print(msg: string): void
 external fn print_number(n: number): void
 
+fn print(n: number): void = print_number(n)
+
 fn get_ten(): number = 10
 
 fn check(a: number): number {
@@ -10,7 +12,13 @@ fn check(a: number): number {
 fn add(a: number, b: number): number = a
 fn add(a: number): number = a
 
+let t = true
+let f = false
+
 let a = get_ten()
-const d = print_number(check(a))
-const e = print_number(add(1, 2))
-const f = print_number(add(5))
+
+a = 50
+
+const d = print(check(a))
+const e = print(add(1, 2))
+const f = print(add(5))

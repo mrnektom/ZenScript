@@ -5,6 +5,7 @@ const ast_node = @import("ast_node.zig");
 const ZSExprType = enum {
     number,
     string,
+    boolean,
     call,
     reference,
     if_expr,
@@ -16,6 +17,7 @@ const ZSExprType = enum {
 pub const ZSExpr = union(ZSExprType) {
     number: ZSNumber,
     string: ZSString,
+    boolean: ZSBoolean,
     call: ZSCall,
     reference: ZSReference,
     if_expr: ZSIfExpr,
@@ -31,7 +33,7 @@ pub const ZSExpr = union(ZSExprType) {
             .binary => self.binary.deinit(allocator),
             .block => self.block.deinit(allocator),
             .return_expr => self.return_expr.deinit(allocator),
-            .number, .reference => {},
+            .number, .boolean, .reference => {},
         }
     }
 
@@ -39,6 +41,7 @@ pub const ZSExpr = union(ZSExprType) {
         return switch (self.*) {
             .number => self.number.startPos,
             .string => self.string.startPos,
+            .boolean => self.boolean.startPos,
             .call => self.call.startPos,
             .reference => self.reference.startPos,
             .if_expr => self.if_expr.startPos,
@@ -52,6 +55,7 @@ pub const ZSExpr = union(ZSExprType) {
         return switch (self.*) {
             .number => self.number.endPos,
             .string => self.string.endPos,
+            .boolean => self.boolean.endPos,
             .call => self.call.endPos,
             .reference => self.reference.endPos,
             .if_expr => self.if_expr.endPos,
@@ -78,6 +82,11 @@ pub const ZSString = struct {
 };
 pub const ZSReference = struct {
     name: []const u8,
+    startPos: usize,
+    endPos: usize,
+};
+pub const ZSBoolean = struct {
+    value: bool,
     startPos: usize,
     endPos: usize,
 };
