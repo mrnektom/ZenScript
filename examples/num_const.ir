@@ -11,30 +11,36 @@ entry:
   %callres = alloca i32, align 4
   store i32 %call_result, ptr %callres, align 4
   %arg = load i32, ptr %callres, align 4
-  %call_result2 = call i32 @check(i32 %arg)
-  %callres3 = alloca i32, align 4
-  store i32 %call_result2, ptr %callres3, align 4
-  %arg4 = load i32, ptr %callres3, align 4
-  call void @print__number(i32 %arg4)
-  %x5 = alloca i32, align 4
-  store i32 1, ptr %x5, align 4
-  %x6 = alloca i32, align 4
-  store i32 2, ptr %x6, align 4
-  %arg7 = load i32, ptr %x5, align 4
-  %arg8 = load i32, ptr %x6, align 4
-  %call_result9 = call i32 @add__number_number(i32 %arg7, i32 %arg8)
-  %callres10 = alloca i32, align 4
-  store i32 %call_result9, ptr %callres10, align 4
-  %arg11 = load i32, ptr %callres10, align 4
-  call void @print__number(i32 %arg11)
-  %x12 = alloca i32, align 4
-  store i32 5, ptr %x12, align 4
-  %arg13 = load i32, ptr %x12, align 4
-  %call_result14 = call i32 @add__number(i32 %arg13)
-  %callres15 = alloca i32, align 4
-  store i32 %call_result14, ptr %callres15, align 4
-  %arg16 = load i32, ptr %callres15, align 4
-  call void @print__number(i32 %arg16)
+  call void @print__number(i32 %arg)
+  %x2 = alloca i32, align 4
+  store i32 50, ptr %x2, align 4
+  %arg3 = load i32, ptr %x2, align 4
+  call void @print__number(i32 %arg3)
+  %arg4 = load i32, ptr %x2, align 4
+  %call_result5 = call i32 @check(i32 %arg4)
+  %callres6 = alloca i32, align 4
+  store i32 %call_result5, ptr %callres6, align 4
+  %arg7 = load i32, ptr %callres6, align 4
+  call void @print__number(i32 %arg7)
+  %x8 = alloca i32, align 4
+  store i32 1, ptr %x8, align 4
+  %x9 = alloca i32, align 4
+  store i32 2, ptr %x9, align 4
+  %arg10 = load i32, ptr %x8, align 4
+  %arg11 = load i32, ptr %x9, align 4
+  %call_result12 = call i32 @add__number_number(i32 %arg10, i32 %arg11)
+  %callres13 = alloca i32, align 4
+  store i32 %call_result12, ptr %callres13, align 4
+  %arg14 = load i32, ptr %callres13, align 4
+  call void @print__number(i32 %arg14)
+  %x15 = alloca i32, align 4
+  store i32 5, ptr %x15, align 4
+  %arg16 = load i32, ptr %x15, align 4
+  %call_result17 = call i32 @add__number(i32 %arg16)
+  %callres18 = alloca i32, align 4
+  store i32 %call_result17, ptr %callres18, align 4
+  %arg19 = load i32, ptr %callres18, align 4
+  call void @print__number(i32 %arg19)
   ret void
 }
 

@@ -78,7 +78,44 @@ fn nextStmt(self: *Self) !?ast.stmt.ZSStmt {
     const modifiers = try self.nextModifiers();
     if (try self.nextVar()) |v| return ast.stmt.ZSStmt{ .variable = v };
     if (try self.nextFn(modifiers)) |f| return ast.stmt.ZSStmt{ .function = f };
+    if (try self.nextReassign()) |r| return ast.stmt.ZSStmt{ .reassign = r };
     return Error.UnknownToken;
+}
+
+fn nextReassign(self: *Self) Error!?ast.stmt.ZSReassign {
+    // Save state for backtracking
+    const savedPeeked = self.peekedToken;
+    const savedPos = self.tokenizer.position;
+    const savedLine = self.tokenizer.line;
+
+    // Check for non-keyword ident
+    const token = self.peekToken() catch return null;
+    if (token.type != .ident) return null;
+    if (isKeyword(token.value)) return null;
+
+    const name = token.value;
+    self.shiftToken();
+
+    // Check for '='
+    if (self.checkToken("=") catch false) {
+        self.shiftToken();
+        const expr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+        return ast.stmt.ZSReassign{ .name = name, .expr = expr };
+    }
+
+    // Backtrack — not a reassignment
+    self.peekedToken = savedPeeked;
+    self.tokenizer.position = savedPos;
+    self.tokenizer.line = savedLine;
+    return null;
+}
+
+fn isKeyword(value: []const u8) bool {
+    const keywords = [_][]const u8{ "if", "return", "else", "let", "const", "fn", "external", "true", "false" };
+    for (keywords) |kw| {
+        if (std.mem.eql(u8, value, kw)) return true;
+    }
+    return false;
 }
 
 fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {

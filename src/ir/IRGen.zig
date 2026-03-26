@@ -72,6 +72,7 @@ fn generateStmt(self: *Self, stmt: ast.stmt.ZSStmt) ![]const u8 {
     return switch (stmt) {
         .variable => try self.generateVariable(stmt.variable),
         .function => try self.generateFunction(stmt.function),
+        .reassign => try self.generateReassign(stmt.reassign),
     };
 }
 
@@ -125,6 +126,12 @@ fn generateReference(self: *Self, reference: ast.expr.ZSReference) []const u8 {
 fn generateVariable(self: *Self, variable: ast.stmt.ZSVar) ![]const u8 {
     const irName = try self.generateExpr(variable.expr);
     try self.varNames.put(variable.name, irName);
+    return irName;
+}
+
+fn generateReassign(self: *Self, reassign: ast.stmt.ZSReassign) ![]const u8 {
+    const irName = try self.generateExpr(reassign.expr);
+    try self.varNames.put(reassign.name, irName);
     return irName;
 }
 

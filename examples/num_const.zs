@@ -17,7 +17,9 @@ let f = false
 
 let a = get_ten()
 
+print(a)
 a = 50
+print(a)
 
 const d = print(check(a))
 const e = print(add(1, 2))

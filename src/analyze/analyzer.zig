@@ -278,6 +278,10 @@ fn analyzeStmt(self: *Self, stmt: ast.stmt.ZSStmt) !?Symbol {
     return switch (stmt) {
         .variable => try self.analyzeVariable(stmt.variable),
         .function => try self.analyzeFunction(stmt.function),
+        .reassign => {
+            try self.analyzeReassign(stmt.reassign);
+            return null;
+        },
     };
 }
 
@@ -298,6 +302,37 @@ fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) !Symbol.ZSType {
 fn analyzeVariable(self: *Self, variable: ast.stmt.ZSVar) !Symbol {
     const stype = try self.analyzeExpr(variable.expr);
     return .{ .name = variable.name, .assignable = variable.type == .Let, .signature = stype };
+}
+
+fn analyzeReassign(self: *Self, reassign: ast.stmt.ZSReassign) !void {
+    _ = try self.analyzeExpr(reassign.expr);
+    if (self.tableStack.get(reassign.name)) |sym| {
+        if (!sym.assignable) {
+            const root = @import("ZenScript");
+            const nameStart = @intFromPtr(reassign.name.ptr) - @intFromPtr(self.module.source.ptr);
+            try self.errors.append(self.allocator, .{
+                .message = "Cannot reassign const variable",
+                .filename = self.module.filename,
+                .start = nameStart,
+                .end = nameStart + reassign.name.len,
+                .codeLine = root.SourceHelpers.computeSourceLine(self.module.source, nameStart),
+                .lineNumber = root.SourceHelpers.computeLineNumber(self.module.source, nameStart),
+                .lineCol = root.SourceHelpers.computeLineOffset(self.module.source, nameStart),
+            });
+        }
+    } else {
+        const root = @import("ZenScript");
+        const nameStart = @intFromPtr(reassign.name.ptr) - @intFromPtr(self.module.source.ptr);
+        try self.errors.append(self.allocator, .{
+            .message = "Reference not found",
+            .filename = self.module.filename,
+            .start = nameStart,
+            .end = nameStart + reassign.name.len,
+            .codeLine = root.SourceHelpers.computeSourceLine(self.module.source, nameStart),
+            .lineNumber = root.SourceHelpers.computeLineNumber(self.module.source, nameStart),
+            .lineCol = root.SourceHelpers.computeLineOffset(self.module.source, nameStart),
+        });
+    }
 }
 
 fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
