@@ -2,7 +2,7 @@ const std = @import("std");
 
 const Error = error{MissingEntryPoint};
 
-const ExecutionArgs = struct { entryPoint: []const u8 };
+pub const ExecutionArgs = struct { entryPoint: []const u8, dumpIr: bool = false, dumpIrOutput: ?[]const u8 = null, run: bool = false };
 
 pub fn collectArgs() Error!ExecutionArgs {
     var execArgs = ExecutionArgs{ .entryPoint = "" };
@@ -18,6 +18,12 @@ pub fn collectArgs() Error!ExecutionArgs {
             } else {
                 std.debug.print("Expected file path but got end of arguments", .{});
             }
+        } else if (std.mem.eql(u8, arg, "-dump-ir")) {
+            execArgs.dumpIr = true;
+        } else if (std.mem.eql(u8, arg, "-r")) {
+            execArgs.run = true;
+        } else if (std.mem.eql(u8, arg, "-o")) {
+            execArgs.dumpIrOutput = args.next();
         }
     }
 

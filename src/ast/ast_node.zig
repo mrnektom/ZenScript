@@ -1,8 +1,12 @@
 const std = @import("std");
 pub const expr = @import("zs_expr.zig");
 pub const stmt = @import("zs_stmt.zig");
+pub const type_notation = @import("zs_type_notation.zig");
 
 pub const VarType = stmt.VarType;
+
+pub const ZSType = type_notation.ZSType;
+pub const ZSBuiltin = type_notation.BuiltinType;
 
 const ZSAstType = enum {
     stmt,

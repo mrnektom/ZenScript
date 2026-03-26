@@ -139,7 +139,7 @@ fn nextFn(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSFn {
     return ast.stmt.ZSFn{
         .name = name,
         .modifiers = modifiers,
-        .args = args.items,
+        .args = try self.allocator.dupe(ast.stmt.ZSFn.Arg, args.items),
         .ret = ret,
     };
 }
@@ -160,6 +160,7 @@ fn nextModifiers(self: *Self) Error!ast.stmt.Modifiers {
         if (std.mem.eql(u8, token.value, "external")) {
             if (external) |_| break;
             external = ast.stmt.Modifier{ .start = token.startPos, .end = token.endPos };
+            self.shiftToken();
         } else {
             break;
         }

@@ -1,5 +1,5 @@
 const std = @import("std");
-const ZSIRType = enum { assign, call };
+const ZSIRType = enum { assign, call, fn_decl };
 
 pub const ZSIRInstructions = struct {
     instructions: []ZSIR,
@@ -12,6 +12,7 @@ pub const ZSIRInstructions = struct {
 pub const ZSIR = union(ZSIRType) {
     assign: ZSIRAssign,
     call: ZSIRCall,
+    fn_decl: ZSIRFnDecl,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -19,6 +20,7 @@ pub const ZSIR = union(ZSIRType) {
                 self.assign.deinit(allocator);
             },
             .call => self.call.deinit(allocator),
+            .fn_decl => self.fn_decl.deinit(allocator),
         }
     }
 
@@ -29,6 +31,7 @@ pub const ZSIR = union(ZSIRType) {
         switch (self) {
             .assign => try writer.print("{f}", .{self.assign}),
             .call => try writer.print("{f}", .{self.call}),
+            .fn_decl => {},
         }
     }
 };
@@ -86,5 +89,16 @@ pub const ZSIRCall = struct {
             if (index < self.argNames.len - 1) try writer.print("{s}", .{argname});
         }
         try writer.print(")", .{});
+    }
+};
+
+pub const ZSIRFnDecl = struct {
+    name: []const u8,
+    argTypes: []const []const u8,
+    retType: []const u8,
+    external: bool,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.argTypes);
     }
 };

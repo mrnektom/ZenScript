@@ -5,6 +5,11 @@ const types = llvm.types;
 const core = llvm.core;
 const ir = @import("../ir/ZSIR.zig");
 
+const LocalVar = struct {
+    ptr: types.LLVMValueRef,
+    ty: types.LLVMTypeRef,
+};
+
 pub fn generate() void {
     _ = target.LLVMInitializeNativeTarget();
     _ = target.LLVMInitializeNativeAsmPrinter();
@@ -35,15 +40,13 @@ pub fn generate() void {
 
     // Dump the LLVM module to stdout
     core.LLVMDumpModule(module);
-
-    // Clean up LLVM resources
 }
 
 pub fn generateLLVMModule(
     instructions: *const ir.ZSIRInstructions,
+    allocator: std.mem.Allocator,
 ) !types.LLVMModuleRef {
     startupLLVM();
-    // defer core.LLVMShutdown();
 
     const module: types.LLVMModuleRef = core.LLVMModuleCreateWithName("zs_module");
 
@@ -54,28 +57,50 @@ pub fn generateLLVMModule(
     const entry: types.LLVMBasicBlockRef = core.LLVMAppendBasicBlock(init_func, "entry");
 
     const builder: types.LLVMBuilderRef = core.LLVMCreateBuilder();
-    // defer core.LLVMDisposeBuilder(builder);
 
     core.LLVMPositionBuilderAtEnd(builder, entry);
 
+    var locals = std.StringHashMap(LocalVar).init(allocator);
+    defer locals.deinit();
+
     for (instructions.instructions) |instruction| {
-        try generateInstruction(builder, &instruction);
+        try generateInstruction(builder, module, &locals, &instruction, allocator);
     }
 
     _ = core.LLVMBuildRet(builder, null);
-    core.LLVMDumpModule(module);
 
     return module;
 }
 
-fn generateInstruction(builder: types.LLVMBuilderRef, instruction: *const ir.ZSIR) !void {
+fn generateInstruction(
+    builder: types.LLVMBuilderRef,
+    module: types.LLVMModuleRef,
+    locals: *std.StringHashMap(LocalVar),
+    instruction: *const ir.ZSIR,
+    allocator: std.mem.Allocator,
+) !void {
     switch (instruction.*) {
-        .assign => try generateAssign(builder, instruction.assign),
-        .call => generateCall(builder, instruction.call),
+        .assign => try generateAssign(builder, locals, instruction.assign),
+        .call => try generateCall(builder, module, locals, instruction.call, allocator),
+        .fn_decl => try generateFnDecl(module, instruction.fn_decl, allocator),
     }
 }
 
-fn generateAssign(builder: types.LLVMBuilderRef, assign: ir.ZSIRAssign) !void {
+fn generateFnDecl(module: types.LLVMModuleRef, decl: ir.ZSIRFnDecl, allocator: std.mem.Allocator) !void {
+    const paramCount: c_uint = @intCast(decl.argTypes.len);
+    var paramTypes: [16]types.LLVMTypeRef = undefined;
+    for (decl.argTypes, 0..) |argType, i| {
+        paramTypes[i] = mapType(argType);
+    }
+
+    const retType = mapType(decl.retType);
+    const funcType = core.LLVMFunctionType(retType, &paramTypes, paramCount, 0);
+    const nameZ = try allocator.dupeZ(u8, decl.name);
+    defer allocator.free(nameZ);
+    _ = core.LLVMAddFunction(module, nameZ.ptr, funcType);
+}
+
+fn generateAssign(builder: types.LLVMBuilderRef, locals: *std.StringHashMap(LocalVar), assign: ir.ZSIRAssign) !void {
     const ty = switch (assign.value) {
         .number => core.LLVMInt32Type(),
         .string => getStringType(),
@@ -90,15 +115,56 @@ fn generateAssign(builder: types.LLVMBuilderRef, assign: ir.ZSIRAssign) !void {
     );
 
     _ = core.LLVMBuildStore(builder, value, ptr);
+
+    try locals.put(assign.varName, LocalVar{ .ptr = ptr, .ty = ty });
 }
 
-fn generateCall(builder: types.LLVMBuilderRef, call: ir.ZSIRCall) void {
-    _ = builder;
-    _ = call;
+fn generateCall(
+    builder: types.LLVMBuilderRef,
+    module: types.LLVMModuleRef,
+    locals: *std.StringHashMap(LocalVar),
+    call: ir.ZSIRCall,
+    allocator: std.mem.Allocator,
+) !void {
+    const fnNameZ = try allocator.dupeZ(u8, call.fnName);
+    defer allocator.free(fnNameZ);
+    const funcRef = core.LLVMGetNamedFunction(module, fnNameZ.ptr);
+    if (funcRef == null) return;
+
+    const funcType = core.LLVMGlobalGetValueType(funcRef);
+
+    var args: [16]types.LLVMValueRef = undefined;
+    for (call.argNames, 0..) |argName, i| {
+        if (locals.get(argName)) |local| {
+            args[i] = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "arg");
+        }
+    }
+
+    const argCount: c_uint = @intCast(call.argNames.len);
+
+    const retType = core.LLVMGetReturnType(funcType);
+    const isVoid = core.LLVMGetTypeKind(retType) == .LLVMVoidTypeKind;
+    const resultName: [*:0]const u8 = if (isVoid) "" else "call_result";
+
+    _ = core.LLVMBuildCall2(builder, funcType, funcRef, &args, argCount, resultName);
+}
+
+fn mapType(name: []const u8) types.LLVMTypeRef {
+    if (std.mem.eql(u8, name, "number")) {
+        return core.LLVMInt32Type();
+    } else if (std.mem.eql(u8, name, "string")) {
+        return getStringType();
+    } else if (std.mem.eql(u8, name, "c_string")) {
+        return core.LLVMPointerType(core.LLVMInt8Type(), 0);
+    } else if (std.mem.eql(u8, name, "void")) {
+        return core.LLVMVoidType();
+    } else {
+        return core.LLVMVoidType();
+    }
 }
 
 fn getStringType() types.LLVMTypeRef {
-    var elems: [2]types.LLVMTypeRef = [_]types.LLVMTypeRef{ core.LLVMInt32Type(), core.LLVMInt8Type() };
+    var elems: [2]types.LLVMTypeRef = [_]types.LLVMTypeRef{ core.LLVMInt32Type(), core.LLVMPointerType(core.LLVMInt8Type(), 0) };
     return core.LLVMStructType(&elems, 2, 0);
 }
 
@@ -116,7 +182,7 @@ fn getStringValue(builder: types.LLVMBuilderRef, value: [*:0]const u8) !types.LL
     const str = core.LLVMConstString(value, @intCast(zStr.len), 1);
     _ = core.LLVMBuildStore(builder, str, ptr);
     var values: [2]types.LLVMValueRef = [_]types.LLVMValueRef{ core.LLVMConstInt(core.LLVMInt32Type(), zStr.len, 0), ptr };
-    return core.LLVMConstStruct(&values, 1, 0);
+    return core.LLVMConstStruct(&values, 2, 0);
 }
 
 fn convertToCString(allocator: std.mem.Allocator, str: *const []const u8) ![*:0]const u8 {

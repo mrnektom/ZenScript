@@ -61,7 +61,7 @@ fn currentTokenType(self: *Tokenizer) Error!?TokenType {
             if (std.ascii.isDigit(firstChar)) {
                 break :e TokenType.numeric;
             }
-            if (std.ascii.isAlphabetic(firstChar)) {
+            if (std.ascii.isAlphabetic(firstChar) or firstChar == '_') {
                 break :e TokenType.ident;
             }
             if (std.ascii.isWhitespace(firstChar)) {
@@ -77,7 +77,7 @@ fn eatIdent(self: *Tokenizer) void {
     self.shift();
 
     while (self.peek()) |c| {
-        if (!std.ascii.isAlphanumeric(c)) break;
+        if (!std.ascii.isAlphanumeric(c) and c != '_') break;
         self.shift();
     }
 }

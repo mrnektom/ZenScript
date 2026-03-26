@@ -1,8 +1,9 @@
 const std = @import("std");
 const zsm = @import("../ast/zs_module.zig");
 const ast = @import("../ast/ast_node.zig");
-const Symbol = @import("symbol.zig");
+const sig = @import("symbol_signature.zig");
 const sts = @import("symbol_table_stack.zig");
+const Symbol = @import("symbol.zig");
 const AnalyzeError = @import("AnalazeError.zig");
 const SymbolTable = sts.SymbolTable;
 const Self = @This();
@@ -67,6 +68,7 @@ fn analyzeNode(self: *Self, node: ast.ZSAstNode) !?Symbol {
 fn analyzeStmt(self: *Self, stmt: ast.stmt.ZSStmt) !?Symbol {
     return switch (stmt) {
         .variable => try self.analyzeVariable(stmt.variable),
+        .function => try self.analyzeFunction(stmt.function),
     };
 }
 
@@ -75,7 +77,7 @@ fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) !Symbol.ZSType {
     return switch (expr) {
         .number => Symbol.ZSType.number,
         .string => Symbol.ZSType.string,
-        .call => try self.analyzeCall(expr.call),
+        .call => self.analyzeCall(expr.call),
         .reference => self.analyzeReference(expr.reference),
     };
 }
@@ -85,10 +87,50 @@ fn analyzeVariable(self: *Self, variable: ast.stmt.ZSVar) !Symbol {
     return .{ .name = variable.name, .assignable = variable.type == .Let, .signature = stype };
 }
 
+fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
+    const ret = try self.analyzeType(&function.ret);
+    const args = try self.analyzeFnArgs(function.args);
+    return .{
+        .name = function.name,
+        .assignable = false,
+        .signature = Symbol.ZSType{
+            .function = .{
+                .ret = &ret,
+                .args = args,
+            },
+        },
+    };
+}
+
+fn analyzeType(self: *Self, ret: *const ?ast.ZSType) !Symbol.ZSType {
+    _ = self;
+    if (ret.*) |r| {
+        return switch (r) {
+            .reference => .unknown,
+        };
+    }
+    return .unknown;
+}
+
+fn analyzeBuiltin(self: *Self, builtin: ast.ZSBuiltin) !Symbol.ZSType {
+    _ = self;
+    return switch (builtin) {
+        .number => Symbol.ZSType.number,
+    };
+}
+
+fn analyzeFnArgs(self: *Self, args: []ast.stmt.ZSFn.Arg) ![]Symbol.sig.ZSFnArg {
+    _ = self;
+    _ = args;
+
+    return &[_]Symbol.sig.ZSFnArg{};
+}
+
 fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
     const subjectType = try self.analyzeExpr(call.subject.*);
     return switch (subjectType) {
         .function => subjectType.function.ret.*,
+        .unknown => Symbol.ZSType.unknown,
         else => blk: {
             try self.recordError(call, "Subject is not a function");
             break :blk Symbol.ZSType.unknown;
@@ -96,11 +138,11 @@ fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
     };
 }
 
-fn analyzeReference(self: *Self, ref: ast.expr.ZSReference) Symbol.ZSType {
+fn analyzeReference(self: *Self, ref: ast.expr.ZSReference) !Symbol.ZSType {
     if (self.tableStack.get(ref.name)) |sym| {
         return sym.signature;
     }
-
+    try self.recordError(ref, "Reference not found");
     return Symbol.ZSType.unknown;
 }
 

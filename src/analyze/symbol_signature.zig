@@ -7,6 +7,8 @@ pub const ZSType = union(ZSTType) {
 };
 
 pub const ZSFunction = struct {
-    ret: *ZSType,
-    args: []ZSType,
+    ret: *const ZSType,
+    args: []ZSFnArg,
 };
+
+pub const ZSFnArg = struct { name: []const u8, type: ZSType };

@@ -9,7 +9,7 @@ pub fn main() !void {
     const args = try Args.collectArgs();
 
     var pipline = Pipline.create();
-    try pipline.compile(args.entryPoint);
+    try pipline.compile(args);
 }
 
 test "simple test" {
