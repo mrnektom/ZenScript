@@ -87,6 +87,7 @@ fn generateInstruction(
         .ret => generateRet(builder, locals, instruction.ret),
         .branch => try generateBranch(builder, module, locals, instruction.branch, allocator),
         .compare => try generateCompare(builder, locals, instruction.compare, allocator),
+        .module_init => try generateModuleInit(builder, module, instruction.module_init, allocator),
     }
 }
 
@@ -298,6 +299,31 @@ fn generateCompare(
     try locals.put(cmp.resultName, LocalVar{ .ptr = ptr, .ty = core.LLVMInt1Type() });
 
     _ = allocator;
+}
+
+fn generateModuleInit(
+    builder: types.LLVMBuilderRef,
+    module: types.LLVMModuleRef,
+    modInit: ir.ZSIRModuleInit,
+    allocator: std.mem.Allocator,
+) !void {
+    // Call the dependency's init function: <module_path>_init()
+    const initName = try std.fmt.allocPrint(allocator, "{s}_init", .{modInit.name});
+    defer allocator.free(initName);
+    const initNameZ = try allocator.dupeZ(u8, initName);
+    defer allocator.free(initNameZ);
+
+    var initFunc = core.LLVMGetNamedFunction(module, initNameZ.ptr);
+    if (initFunc == null) {
+        // Declare it as external void()
+        var noParams: [0]types.LLVMTypeRef = .{};
+        const funcType = core.LLVMFunctionType(core.LLVMVoidType(), &noParams, 0, 0);
+        initFunc = core.LLVMAddFunction(module, initNameZ.ptr, funcType);
+    }
+
+    const funcType = core.LLVMGlobalGetValueType(initFunc);
+    var noArgs: [0]types.LLVMValueRef = .{};
+    _ = core.LLVMBuildCall2(builder, funcType, initFunc, &noArgs, 0, "");
 }
 
 fn generateAssign(builder: types.LLVMBuilderRef, locals: *std.StringHashMap(LocalVar), assign: ir.ZSIRAssign) !void {

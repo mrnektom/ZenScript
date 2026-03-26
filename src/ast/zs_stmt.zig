@@ -32,6 +32,7 @@ pub const ZSStmt = union(ZSStmtType) {
 
 pub const Modifiers = struct {
     external: ?Modifier,
+    exported: ?Modifier,
 };
 
 pub const Modifier = struct { start: usize, end: usize };

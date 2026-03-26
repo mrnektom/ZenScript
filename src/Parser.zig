@@ -35,8 +35,6 @@ pub fn parse(self: *Self, allocator: std.mem.Allocator) !ZSModule {
     var astNodes = try std.ArrayList(ZSAstNode).initCapacity(allocator, 5);
     defer astNodes.deinit(allocator);
 
-    const deps = try allocator.alloc(zsm.ZSModuleDep, 0);
-
     while (true) {
         const node = self.nextNode() catch |err| break try self.printError(err);
 
@@ -52,9 +50,24 @@ pub fn parse(self: *Self, allocator: std.mem.Allocator) !ZSModule {
     const astItems = try allocator.alloc(ZSAstNode, astNodes.items.len);
     @memcpy(astItems, astNodes.items);
 
+    // Collect deps from import_decl nodes
+    var depsList = try std.ArrayList(zsm.ZSModuleDep).initCapacity(allocator, 2);
+    defer depsList.deinit(allocator);
+    for (astItems) |node| {
+        switch (node) {
+            .import_decl => |imp| {
+                try depsList.append(allocator, zsm.ZSModuleDep{
+                    .path = imp.path,
+                    .symbols = imp.symbols,
+                });
+            },
+            else => {},
+        }
+    }
+
     return .{
         .ast = astItems,
-        .deps = deps,
+        .deps = try allocator.dupe(zsm.ZSModuleDep, depsList.items),
         .filename = self.filename,
         .source = self.source,
     };
@@ -62,21 +75,76 @@ pub fn parse(self: *Self, allocator: std.mem.Allocator) !ZSModule {
 
 fn nextNode(self: *Self) !?ZSAstNode {
     if (!self.tokenizer.hasNext() and self.peekedToken == null) return null;
-    const stmt = self.nextStmt() catch |err| {
+    if (try self.nextImport()) |imp| {
+        return ZSAstNode{ .import_decl = imp };
+    }
+    const s = self.nextStmt() catch |err| {
         if (try self.nextExpr()) |e| {
             return ZSAstNode{ .expr = e };
         }
         return err;
     };
-    if (stmt) |s| {
-        return ZSAstNode{ .stmt = s };
+    if (s) |stmt| {
+        return ZSAstNode{ .stmt = stmt };
     } else return Error.UnknownToken;
+}
+
+fn nextImport(self: *Self) Error!?ast.ZSImport {
+    if (!self.checkToken("import")) return null;
+    const startToken = try self.peekToken();
+    self.shiftToken();
+
+    try self.expectToken("{");
+
+    var symbols = try std.ArrayList(ast.zs_import.ImportedSymbol).initCapacity(self.allocator, 4);
+    defer symbols.deinit(self.allocator);
+
+    while (true) {
+        if (self.checkToken("}")) break;
+        const name = try self.nextIdent();
+        var alias: ?[]const u8 = null;
+        if (self.checkToken("as")) {
+            self.shiftToken();
+            alias = try self.nextIdent();
+        }
+        try symbols.append(self.allocator, .{ .name = name, .alias = alias });
+        if (self.checkToken(",")) {
+            self.shiftToken();
+            continue;
+        }
+        break;
+    }
+    try self.expectToken("}");
+
+    // expect "from"
+    const fromToken = try self.peekToken();
+    if (!std.mem.eql(u8, fromToken.value, "from")) return Error.UnexpectedToken;
+    self.shiftToken();
+
+    // parse path string
+    const pathToken = try self.peekToken();
+    if (pathToken.type != .string) return Error.UnexpectedTokenType;
+    self.shiftToken();
+
+    // Strip quotes from path
+    const rawPath = pathToken.value;
+    const path = if (std.mem.startsWith(u8, rawPath, "\"") and std.mem.endsWith(u8, rawPath, "\""))
+        rawPath[1 .. rawPath.len - 1]
+    else
+        rawPath;
+
+    return ast.ZSImport{
+        .path = path,
+        .symbols = try self.allocator.dupe(ast.zs_import.ImportedSymbol, symbols.items),
+        .startPos = startToken.startPos,
+        .endPos = pathToken.endPos,
+    };
 }
 
 fn nextStmt(self: *Self) !?ast.stmt.ZSStmt {
     if (!self.tokenizer.hasNext() and self.peekedToken == null) return null;
     const modifiers = try self.nextModifiers();
-    if (try self.nextVar()) |v| return ast.stmt.ZSStmt{ .variable = v };
+    if (try self.nextVar(modifiers)) |v| return ast.stmt.ZSStmt{ .variable = v };
     if (try self.nextFn(modifiers)) |f| return ast.stmt.ZSStmt{ .function = f };
     if (try self.nextReassign()) |r| return ast.stmt.ZSStmt{ .reassign = r };
     return Error.UnknownToken;
@@ -111,7 +179,7 @@ fn nextReassign(self: *Self) Error!?ast.stmt.ZSReassign {
 }
 
 fn isKeyword(value: []const u8) bool {
-    const keywords = [_][]const u8{ "if", "return", "else", "let", "const", "fn", "external", "true", "false" };
+    const keywords = [_][]const u8{ "if", "return", "else", "let", "const", "fn", "external", "true", "false", "import", "export", "from", "as" };
     for (keywords) |kw| {
         if (std.mem.eql(u8, value, kw)) return true;
     }
@@ -271,7 +339,7 @@ fn nextBlock(self: *Self) Error!?ast.expr.ZSBlock {
     };
 }
 
-fn nextVar(self: *Self) Error!?ast.stmt.ZSVar {
+fn nextVar(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSVar {
     const varType = block: {
         if (self.checkToken("const")) break :block VarType.Const;
         if (self.checkToken("let")) break :block VarType.Let;
@@ -282,7 +350,7 @@ fn nextVar(self: *Self) Error!?ast.stmt.ZSVar {
     try self.expectToken("=");
     const expr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
 
-    return ast.stmt.ZSVar{ .type = varType, .name = name, .expr = expr };
+    return ast.stmt.ZSVar{ .type = varType, .name = name, .expr = expr, .modifiers = modifiers };
 }
 
 fn nextFn(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSFn {
@@ -344,17 +412,22 @@ fn nextType(self: *Self) !?ast.ZSType {
 
 fn nextModifiers(self: *Self) Error!ast.stmt.Modifiers {
     var external: ?ast.stmt.Modifier = null;
+    var exported: ?ast.stmt.Modifier = null;
     while (true) {
         const token = try self.peekToken();
         if (std.mem.eql(u8, token.value, "external")) {
             if (external) |_| break;
             external = ast.stmt.Modifier{ .start = token.startPos, .end = token.endPos };
             self.shiftToken();
+        } else if (std.mem.eql(u8, token.value, "export")) {
+            if (exported) |_| break;
+            exported = ast.stmt.Modifier{ .start = token.startPos, .end = token.endPos };
+            self.shiftToken();
         } else {
             break;
         }
     }
-    return ast.stmt.Modifiers{ .external = external };
+    return ast.stmt.Modifiers{ .external = external, .exported = exported };
 }
 
 fn nextCall(self: *Self, subject: ast.expr.ZSExpr) Error!?ast.expr.ZSCall {
@@ -402,14 +475,7 @@ fn nextReference(self: *Self) !?ast.expr.ZSReference {
     const token = try self.peekToken();
     if (token.type != .ident) return Error.UnexpectedTokenType;
     // Don't consume keywords that are handled elsewhere
-    if (std.mem.eql(u8, token.value, "if") or
-        std.mem.eql(u8, token.value, "return") or
-        std.mem.eql(u8, token.value, "else") or
-        std.mem.eql(u8, token.value, "let") or
-        std.mem.eql(u8, token.value, "const") or
-        std.mem.eql(u8, token.value, "fn") or
-        std.mem.eql(u8, token.value, "external"))
-    {
+    if (isKeyword(token.value)) {
         return null;
     }
     self.shiftToken();
@@ -643,4 +709,41 @@ test "parse if else expression" {
     defer module.deinit(allocator);
     const f = module.ast[0].stmt.function;
     try std.testing.expect(f.body != null);
+}
+
+test "parse import statement" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("import { x, add as sum } from \"./lib.zs\"");
+    defer module.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), module.ast.len);
+    const imp = module.ast[0].import_decl;
+    try std.testing.expectEqualStrings("./lib.zs", imp.path);
+    try std.testing.expectEqual(@as(usize, 2), imp.symbols.len);
+    try std.testing.expectEqualStrings("x", imp.symbols[0].name);
+    try std.testing.expect(imp.symbols[0].alias == null);
+    try std.testing.expectEqualStrings("add", imp.symbols[1].name);
+    try std.testing.expectEqualStrings("sum", imp.symbols[1].alias.?);
+    // Should produce a dependency
+    try std.testing.expectEqual(@as(usize, 1), module.deps.len);
+    try std.testing.expectEqualStrings("./lib.zs", module.deps[0].path);
+}
+
+test "parse export let" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("export let x = 10");
+    defer module.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), module.ast.len);
+    const v = module.ast[0].stmt.variable;
+    try std.testing.expectEqualStrings("x", v.name);
+    try std.testing.expect(v.modifiers.exported != null);
+}
+
+test "parse export fn" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("export fn add(a: number, b: number): number = a");
+    defer module.deinit(allocator);
+    const f = module.ast[0].stmt.function;
+    try std.testing.expectEqualStrings("add", f.name);
+    try std.testing.expect(f.modifiers.exported != null);
+    try std.testing.expect(f.modifiers.external == null);
 }

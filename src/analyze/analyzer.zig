@@ -12,6 +12,8 @@ tableStack: *sts,
 errors: *std.ArrayList(AnalyzeError),
 allocator: std.mem.Allocator,
 module: zsm.ZSModule,
+deps: *const std.StringHashMap(AnalyzeResult),
+exports: SymbolTable,
 overloads: std.StringHashMap(std.ArrayList(OverloadEntry)),
 resolutions: std.AutoHashMap(usize, []const u8),
 overloadedNames: std.StringHashMap(void),
@@ -77,7 +79,7 @@ fn typeToString(zsType: Symbol.ZSType) []const u8 {
     };
 }
 
-pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator) !AnalyzeResult {
+pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator, deps: *const std.StringHashMap(AnalyzeResult)) !AnalyzeResult {
     var errors = try std.ArrayList(AnalyzeError).initCapacity(allocator, 1);
     defer errors.deinit(allocator);
     var tableStack = try sts.create(allocator);
@@ -87,6 +89,8 @@ pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator) !AnalyzeResul
         .errors = &errors,
         .allocator = allocator,
         .module = module,
+        .deps = deps,
+        .exports = SymbolTable.init(allocator),
         .overloads = std.StringHashMap(std.ArrayList(OverloadEntry)).init(allocator),
         .resolutions = std.AutoHashMap(usize, []const u8).init(allocator),
         .overloadedNames = std.StringHashMap(void).init(allocator),
@@ -108,6 +112,7 @@ pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator) !AnalyzeResul
     // are moved into the result, not freed here
 
     var table = SymbolTable.init(allocator);
+    defer table.deinit();
     try tableStack.enterScope(&table);
 
     // Pre-pass: register all function overloads
@@ -125,7 +130,7 @@ pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator) !AnalyzeResul
     _ = try tableStack.exitScope();
 
     return .{
-        .exports = table,
+        .exports = analyzer.exports,
         .errors = try allocator.dupe(AnalyzeError, errors.items),
         .resolutions = analyzer.resolutions,
         .overloadedNames = analyzer.overloadedNames,
@@ -146,7 +151,7 @@ fn registerFunctions(self: *Self, module: zsm.ZSModule) !void {
                     else => {},
                 }
             },
-            else => {},
+            .import_decl, .expr => {},
         }
     }
 }
@@ -234,7 +239,29 @@ fn analyzeNode(self: *Self, node: ast.ZSAstNode) !?Symbol {
             _ = try self.analyzeExpr(node.expr);
             break :b null;
         },
+        .import_decl => try self.analyzeImport(node.import_decl),
     };
+}
+
+fn analyzeImport(self: *Self, imp: ast.ZSImport) !?Symbol {
+    // Look up dependency analysis results
+    if (self.deps.get(imp.path)) |depResult| {
+        for (imp.symbols) |sym| {
+            const localName = sym.alias orelse sym.name;
+            if (depResult.exports.get(sym.name)) |exportedSym| {
+                try self.tableStack.put(.{
+                    .name = localName,
+                    .assignable = exportedSym.assignable,
+                    .signature = exportedSym.signature,
+                });
+            } else {
+                try self.recordErrorAt(imp.startPos, imp.endPos, "Imported symbol not found in module");
+            }
+        }
+    } else {
+        try self.recordErrorAt(imp.startPos, imp.endPos, "Module not found");
+    }
+    return null;
 }
 
 fn analyzeStmt(self: *Self, stmt: ast.stmt.ZSStmt) !?Symbol {
@@ -264,7 +291,11 @@ fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) !Symbol.ZSType {
 
 fn analyzeVariable(self: *Self, variable: ast.stmt.ZSVar) !Symbol {
     const stype = try self.analyzeExpr(variable.expr);
-    return .{ .name = variable.name, .assignable = variable.type == .Let, .signature = stype };
+    const sym = Symbol{ .name = variable.name, .assignable = variable.type == .Let, .signature = stype };
+    if (variable.modifiers.exported != null) {
+        try self.exports.put(sym.name, sym);
+    }
+    return sym;
 }
 
 fn analyzeReassign(self: *Self, reassign: ast.stmt.ZSReassign) !void {
@@ -306,7 +337,7 @@ fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
         _ = try self.tableStack.exitScope();
     }
 
-    return .{
+    const sym = Symbol{
         .name = function.name,
         .assignable = false,
         .signature = Symbol.ZSType{
@@ -316,6 +347,10 @@ fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
             },
         },
     };
+    if (function.modifiers.exported != null) {
+        try self.exports.put(sym.name, sym);
+    }
+    return sym;
 }
 
 fn analyzeType(self: *Self, ret: *const ?ast.ZSType) !Symbol.ZSType {
@@ -440,6 +475,9 @@ fn analyzeBlock(self: *Self, block: ast.expr.ZSBlock) Error!Symbol.ZSType {
             },
             .expr => {
                 lastType = try self.analyzeExpr(node.expr);
+            },
+            .import_decl => {
+                lastType = .unknown;
             },
         }
     }

@@ -13,28 +13,59 @@ varNames: std.StringHashMap([]const u8),
 resolutions: *const std.AutoHashMap(usize, []const u8),
 overloadedNames: *const std.StringHashMap(void),
 
+pub const IrGenResult = struct {
+    instructions: ir.ZSIRInstructions,
+    varNames: std.StringHashMap([]const u8),
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        self.instructions.deinit(allocator);
+        self.varNames.deinit();
+    }
+};
+
 pub fn generateIr(
     module: *const zsm.ZSModule,
     allocator: std.mem.Allocator,
     resolutions: *const std.AutoHashMap(usize, []const u8),
     overloadedNames: *const std.StringHashMap(void),
-) !ir.ZSIRInstructions {
+) !IrGenResult {
+    return generateIrWithImports(module, allocator, resolutions, overloadedNames, null);
+}
+
+pub fn generateIrWithImports(
+    module: *const zsm.ZSModule,
+    allocator: std.mem.Allocator,
+    resolutions: *const std.AutoHashMap(usize, []const u8),
+    overloadedNames: *const std.StringHashMap(void),
+    importedVarNames: ?*const std.StringHashMap([]const u8),
+) !IrGenResult {
     var instructions = try std.ArrayList(ir.ZSIR).initCapacity(allocator, 5);
     defer instructions.deinit(allocator);
+
+    var varNames = std.StringHashMap([]const u8).init(allocator);
+    // Pre-populate with imported variable mappings
+    if (importedVarNames) |imports| {
+        var it = imports.iterator();
+        while (it.next()) |entry| {
+            try varNames.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+    }
 
     var irGen = Self{
         .instructions = &instructions,
         .allocator = allocator,
-        .varNames = std.StringHashMap([]const u8).init(allocator),
+        .varNames = varNames,
         .resolutions = resolutions,
         .overloadedNames = overloadedNames,
     };
-    defer irGen.varNames.deinit();
 
     for (module.ast) |node| {
         _ = try irGen.generateNode(node);
     }
-    return .{ .instructions = try allocator.dupe(ir.ZSIR, instructions.items) };
+    return .{
+        .instructions = .{ .instructions = try allocator.dupe(ir.ZSIR, instructions.items) },
+        .varNames = irGen.varNames,
+    };
 }
 
 const computeMangledName = @import("ZenScript").MangleHelpers.computeMangledName;
@@ -43,7 +74,16 @@ fn generateNode(self: *Self, node: ast.ZSAstNode) ![]const u8 {
     return switch (node) {
         .stmt => try self.generateStmt(node.stmt),
         .expr => self.generateExpr(node.expr),
+        .import_decl => |imp| try self.generateImport(imp),
     };
+}
+
+fn generateImport(self: *Self, imp: ast.ZSImport) ![]const u8 {
+    try self.instructions.append(
+        self.allocator,
+        ir.ZSIR{ .module_init = ir.ZSIRModuleInit{ .name = imp.path } },
+    );
+    return "";
 }
 
 fn generateStmt(self: *Self, stmt: ast.stmt.ZSStmt) ![]const u8 {

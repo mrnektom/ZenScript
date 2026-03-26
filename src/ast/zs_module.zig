@@ -1,5 +1,8 @@
 const std = @import("std");
 const ast = @import("ast_node.zig");
+const zs_import = @import("zs_import.zig");
+
+pub const ImportedSymbol = zs_import.ImportedSymbol;
 
 pub const ZSModule = struct {
     deps: []ZSModuleDep,
@@ -18,10 +21,5 @@ pub const ZSModule = struct {
 
 pub const ZSModuleDep = struct {
     path: []const u8,
-    symbols: [][]const u8,
-};
-
-const ZSAstType = enum {
-    variable,
-    expr,
+    symbols: []ImportedSymbol,
 };
