@@ -78,11 +78,15 @@ fn generateInstruction(
     locals: *std.StringHashMap(LocalVar),
     instruction: *const ir.ZSIR,
     allocator: std.mem.Allocator,
-) !void {
+) std.mem.Allocator.Error!void {
     switch (instruction.*) {
         .assign => try generateAssign(builder, locals, instruction.assign),
         .call => try generateCall(builder, module, locals, instruction.call, allocator),
         .fn_decl => try generateFnDecl(module, instruction.fn_decl, allocator),
+        .fn_def => try generateFnDef(builder, module, instruction.fn_def, allocator),
+        .ret => generateRet(builder, locals, instruction.ret),
+        .branch => try generateBranch(builder, module, locals, instruction.branch, allocator),
+        .compare => try generateCompare(builder, locals, instruction.compare, allocator),
     }
 }
 
@@ -98,6 +102,176 @@ fn generateFnDecl(module: types.LLVMModuleRef, decl: ir.ZSIRFnDecl, allocator: s
     const nameZ = try allocator.dupeZ(u8, decl.name);
     defer allocator.free(nameZ);
     _ = core.LLVMAddFunction(module, nameZ.ptr, funcType);
+}
+
+fn generateFnDef(
+    outerBuilder: types.LLVMBuilderRef,
+    module: types.LLVMModuleRef,
+    def: ir.ZSIRFnDef,
+    allocator: std.mem.Allocator,
+) !void {
+    const paramCount: c_uint = @intCast(def.argTypes.len);
+    var paramTypes: [16]types.LLVMTypeRef = undefined;
+    for (def.argTypes, 0..) |argType, i| {
+        paramTypes[i] = mapType(argType);
+    }
+
+    const retType = mapType(def.retType);
+    const funcType = core.LLVMFunctionType(retType, &paramTypes, paramCount, 0);
+    const nameZ = try allocator.dupeZ(u8, def.name);
+    defer allocator.free(nameZ);
+    const func = core.LLVMAddFunction(module, nameZ.ptr, funcType);
+
+    const entry = core.LLVMAppendBasicBlock(func, "entry");
+    const builder = core.LLVMCreateBuilder();
+    defer core.LLVMDisposeBuilder(builder);
+    core.LLVMPositionBuilderAtEnd(builder, entry);
+
+    // Alloca and store params
+    var fnLocals = std.StringHashMap(LocalVar).init(allocator);
+    defer fnLocals.deinit();
+
+    for (def.argNames, 0..) |argName, i| {
+        const argNameZ = try allocator.dupeZ(u8, argName);
+        defer allocator.free(argNameZ);
+        const paramType = paramTypes[i];
+        const alloca = core.LLVMBuildAlloca(builder, paramType, argNameZ.ptr);
+        _ = core.LLVMBuildStore(builder, core.LLVMGetParam(func, @intCast(i)), alloca);
+        try fnLocals.put(argName, LocalVar{ .ptr = alloca, .ty = paramType });
+    }
+
+    // Generate body instructions
+    for (def.body) |inst| {
+        try generateInstruction(builder, module, &fnLocals, &inst, allocator);
+    }
+
+    // Add implicit return void if the function returns void and last instruction isn't a terminator
+    const currentBlock = core.LLVMGetInsertBlock(builder);
+    const terminator = core.LLVMGetBasicBlockTerminator(currentBlock);
+    if (terminator == null) {
+        if (core.LLVMGetTypeKind(retType) == .LLVMVoidTypeKind) {
+            _ = core.LLVMBuildRetVoid(builder);
+        } else {
+            // Return a default zero value
+            _ = core.LLVMBuildRet(builder, core.LLVMConstInt(retType, 0, 0));
+        }
+    }
+
+    // Restore the outer builder position (it was pointing at init's entry block)
+    _ = outerBuilder;
+}
+
+fn generateRet(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    ret: ir.ZSIRRet,
+) void {
+    if (ret.value) |valName| {
+        if (locals.get(valName)) |local| {
+            const val = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "retval");
+            _ = core.LLVMBuildRet(builder, val);
+        } else {
+            _ = core.LLVMBuildRetVoid(builder);
+        }
+    } else {
+        _ = core.LLVMBuildRetVoid(builder);
+    }
+}
+
+fn generateBranch(
+    builder: types.LLVMBuilderRef,
+    module: types.LLVMModuleRef,
+    locals: *std.StringHashMap(LocalVar),
+    branch: ir.ZSIRBranch,
+    allocator: std.mem.Allocator,
+) !void {
+    // Load the condition value
+    var condVal: types.LLVMValueRef = undefined;
+    if (locals.get(branch.condition)) |local| {
+        condVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "cond");
+    } else {
+        // Condition should always be in locals
+        return;
+    }
+
+    // Convert to i1 (condition != 0)
+    const condBool = core.LLVMBuildICmp(
+        builder,
+        .LLVMIntNE,
+        condVal,
+        core.LLVMConstInt(core.LLVMTypeOf(condVal), 0, 0),
+        "condbool",
+    );
+
+    const currentFunc = core.LLVMGetBasicBlockParent(core.LLVMGetInsertBlock(builder));
+    const thenBlock = core.LLVMAppendBasicBlock(currentFunc, "then");
+    const elseBlock = core.LLVMAppendBasicBlock(currentFunc, "else");
+    const mergeBlock = core.LLVMAppendBasicBlock(currentFunc, "merge");
+
+    _ = core.LLVMBuildCondBr(builder, condBool, thenBlock, elseBlock);
+
+    // Then block
+    core.LLVMPositionBuilderAtEnd(builder, thenBlock);
+    for (branch.thenBody) |inst| {
+        try generateInstruction(builder, module, locals, &inst, allocator);
+    }
+    // Only branch to merge if no terminator (e.g. return)
+    const thenTerm = core.LLVMGetBasicBlockTerminator(core.LLVMGetInsertBlock(builder));
+    if (thenTerm == null) {
+        _ = core.LLVMBuildBr(builder, mergeBlock);
+    }
+
+    // Else block
+    core.LLVMPositionBuilderAtEnd(builder, elseBlock);
+    for (branch.elseBody) |inst| {
+        try generateInstruction(builder, module, locals, &inst, allocator);
+    }
+    const elseTerm = core.LLVMGetBasicBlockTerminator(core.LLVMGetInsertBlock(builder));
+    if (elseTerm == null) {
+        _ = core.LLVMBuildBr(builder, mergeBlock);
+    }
+
+    // Merge block
+    core.LLVMPositionBuilderAtEnd(builder, mergeBlock);
+}
+
+fn generateCompare(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    cmp: ir.ZSIRCompare,
+    allocator: std.mem.Allocator,
+) !void {
+    // Load LHS
+    var lhsVal: types.LLVMValueRef = undefined;
+    if (locals.get(cmp.lhs)) |local| {
+        lhsVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "lhs");
+    } else {
+        return;
+    }
+
+    // Load RHS
+    var rhsVal: types.LLVMValueRef = undefined;
+    if (locals.get(cmp.rhs)) |local| {
+        rhsVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "rhs");
+    } else {
+        return;
+    }
+
+    const pred: types.LLVMIntPredicate = if (std.mem.eql(u8, cmp.op, "=="))
+        .LLVMIntEQ
+    else
+        .LLVMIntNE;
+
+    // Result is i1, extend to i32 for storage
+    const cmpResult = core.LLVMBuildICmp(builder, pred, lhsVal, rhsVal, "cmp");
+    const extended = core.LLVMBuildZExt(builder, cmpResult, core.LLVMInt32Type(), "cmpext");
+
+    // Store result
+    const ptr = core.LLVMBuildAlloca(builder, core.LLVMInt32Type(), "cmpres");
+    _ = core.LLVMBuildStore(builder, extended, ptr);
+    try locals.put(cmp.resultName, LocalVar{ .ptr = ptr, .ty = core.LLVMInt32Type() });
+
+    _ = allocator;
 }
 
 fn generateAssign(builder: types.LLVMBuilderRef, locals: *std.StringHashMap(LocalVar), assign: ir.ZSIRAssign) !void {
@@ -146,7 +320,14 @@ fn generateCall(
     const isVoid = core.LLVMGetTypeKind(retType) == .LLVMVoidTypeKind;
     const resultName: [*:0]const u8 = if (isVoid) "" else "call_result";
 
-    _ = core.LLVMBuildCall2(builder, funcType, funcRef, &args, argCount, resultName);
+    const result = core.LLVMBuildCall2(builder, funcType, funcRef, &args, argCount, resultName);
+
+    // Store non-void results so they can be referenced later
+    if (!isVoid) {
+        const ptr = core.LLVMBuildAlloca(builder, retType, "callres");
+        _ = core.LLVMBuildStore(builder, result, ptr);
+        try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = retType });
+    }
 }
 
 fn mapType(name: []const u8) types.LLVMTypeRef {

@@ -48,6 +48,10 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
         .string => self.generateStringAssign(expr.string),
         .call => self.generateCall(expr.call),
         .reference => self.generateReference(expr.reference),
+        .if_expr => self.generateIfExpr(expr.if_expr),
+        .binary => self.generateBinary(expr.binary),
+        .block => self.generateBlock(expr.block),
+        .return_expr => self.generateReturn(expr.return_expr),
     };
 }
 
@@ -92,14 +96,153 @@ fn generateFunction(self: *Self, func: ast.stmt.ZSFn) ![]const u8 {
     const retType: []const u8 = if (func.ret) |r| r.reference else "void";
     const external = func.modifiers.external != null;
 
+    if (func.body) |body| {
+        // User-defined function with body
+        const argNames = try self.allocator.alloc([]const u8, func.args.len);
+        for (func.args, 0..) |arg, i| {
+            argNames[i] = arg.name;
+        }
+
+        // Generate body instructions into a separate list
+        var bodyInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 8);
+        defer bodyInstructions.deinit(self.allocator);
+
+        // Save and swap instruction target
+        const outerInstructions = self.instructions;
+        self.instructions = &bodyInstructions;
+
+        // Save and create new scope for function args
+        var innerVarNames = std.StringHashMap([]const u8).init(self.allocator);
+        // Copy outer scope
+        var outerIter = self.varNames.iterator();
+        while (outerIter.next()) |entry| {
+            try innerVarNames.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+        // Add function args to scope (they reference themselves by name)
+        for (func.args) |arg| {
+            try innerVarNames.put(arg.name, arg.name);
+        }
+        const outerVarNames = self.varNames;
+        self.varNames = innerVarNames;
+
+        const bodyResult = try self.generateExpr(body);
+
+        // For expression bodies (not blocks), add an implicit return
+        if (body != .block) {
+            try self.instructions.append(
+                self.allocator,
+                ir.ZSIR{
+                    .ret = ir.ZSIRRet{
+                        .value = bodyResult,
+                    },
+                },
+            );
+        }
+
+        // Restore outer state
+        self.instructions = outerInstructions;
+        self.varNames = outerVarNames;
+        innerVarNames.deinit();
+
+        try self.instructions.append(
+            self.allocator,
+            ir.ZSIR{
+                .fn_def = ir.ZSIRFnDef{
+                    .name = func.name,
+                    .argTypes = argTypes,
+                    .argNames = argNames,
+                    .retType = retType,
+                    .body = try self.allocator.dupe(ir.ZSIR, bodyInstructions.items),
+                },
+            },
+        );
+    } else {
+        // External/forward declaration
+        try self.instructions.append(
+            self.allocator,
+            ir.ZSIR{
+                .fn_decl = ir.ZSIRFnDecl{
+                    .name = func.name,
+                    .argTypes = argTypes,
+                    .retType = retType,
+                    .external = external,
+                },
+            },
+        );
+    }
+    return "";
+}
+
+fn generateIfExpr(self: *Self, ifExpr: ast.expr.ZSIfExpr) Error![]const u8 {
+    const condName = try self.generateExpr(ifExpr.condition.*);
+
+    // Generate then body
+    var thenInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
+    defer thenInstructions.deinit(self.allocator);
+    const outerInstructions = self.instructions;
+    self.instructions = &thenInstructions;
+    _ = try self.generateExpr(ifExpr.then_branch.*);
+    self.instructions = outerInstructions;
+
+    // Generate else body
+    var elseInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
+    defer elseInstructions.deinit(self.allocator);
+    if (ifExpr.else_branch) |eb| {
+        self.instructions = &elseInstructions;
+        _ = try self.generateExpr(eb.*);
+        self.instructions = outerInstructions;
+    }
+
     try self.instructions.append(
         self.allocator,
         ir.ZSIR{
-            .fn_decl = ir.ZSIRFnDecl{
-                .name = func.name,
-                .argTypes = argTypes,
-                .retType = retType,
-                .external = external,
+            .branch = ir.ZSIRBranch{
+                .condition = condName,
+                .thenBody = try self.allocator.dupe(ir.ZSIR, thenInstructions.items),
+                .elseBody = try self.allocator.dupe(ir.ZSIR, elseInstructions.items),
+            },
+        },
+    );
+    return "";
+}
+
+fn generateBinary(self: *Self, binary: ast.expr.ZSBinary) Error![]const u8 {
+    const lhsName = try self.generateExpr(binary.lhs.*);
+    const rhsName = try self.generateExpr(binary.rhs.*);
+    const resultName = try self.generateName();
+
+    try self.instructions.append(
+        self.allocator,
+        ir.ZSIR{
+            .compare = ir.ZSIRCompare{
+                .resultName = resultName,
+                .lhs = lhsName,
+                .rhs = rhsName,
+                .op = binary.op,
+            },
+        },
+    );
+    return resultName;
+}
+
+fn generateBlock(self: *Self, block: ast.expr.ZSBlock) Error![]const u8 {
+    var lastResult: []const u8 = "";
+    for (block.stmts) |node| {
+        lastResult = try self.generateNode(node);
+    }
+    return lastResult;
+}
+
+fn generateReturn(self: *Self, ret: ast.expr.ZSReturn) Error![]const u8 {
+    var valueName: ?[]const u8 = null;
+    if (ret.value) |v| {
+        valueName = try self.generateExpr(v.*);
+    }
+    try self.instructions.append(
+        self.allocator,
+        ir.ZSIR{
+            .ret = ir.ZSIRRet{
+                .value = valueName,
             },
         },
     );

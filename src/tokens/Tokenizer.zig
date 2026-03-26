@@ -54,8 +54,8 @@ fn readNumber(self: *Tokenizer) []const u8 {
 fn currentTokenType(self: *Tokenizer) Error!?TokenType {
     const firstChar = self.peek() orelse return null;
     return switch (firstChar) {
-        '=' => .punctuation,
-        '(', ')', ':' => .punctuation,
+        '=', '!' => .punctuation,
+        '(', ')', ':', '{', '}', ',' => .punctuation,
         '"' => .string,
         else => e: {
             if (std.ascii.isDigit(firstChar)) {
@@ -114,8 +114,15 @@ fn eatString(self: *Tokenizer) !void {
 
 fn eatPunc(self: *Tokenizer) void {
     switch (self.peek() orelse return) {
-        '=' => self.shift(),
-        '(', ')', ':' => self.shift(),
+        '=' => {
+            self.shift();
+            if (self.peek() == @as(u8, '=')) self.shift();
+        },
+        '!' => {
+            self.shift();
+            if (self.peek() == @as(u8, '=')) self.shift();
+        },
+        '(', ')', ':', '{', '}', ',' => self.shift(),
 
         else => {},
     }
@@ -191,7 +198,7 @@ test "tokenize string" {
 }
 
 test "tokenize punctuation" {
-    const puncs = [_][]const u8{ "=", "(", ")", ":" };
+    const puncs = [_][]const u8{ "=", "(", ")", ":", "{", "}", ",", "!", "==", "!=" };
     for (puncs) |p| {
         var t = Tokenizer.create(p);
         const tok = (try t.next()).?;

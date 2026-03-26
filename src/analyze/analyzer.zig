@@ -13,7 +13,7 @@ errors: *std.ArrayList(AnalyzeError),
 allocator: std.mem.Allocator,
 module: zsm.ZSModule,
 
-const Error = error{} || std.mem.Allocator.Error;
+const Error = error{} || std.mem.Allocator.Error || sts.Error;
 
 pub const AnalyzeResult = struct {
     exports: SymbolTable,
@@ -73,12 +73,15 @@ fn analyzeStmt(self: *Self, stmt: ast.stmt.ZSStmt) !?Symbol {
 }
 
 fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) !Symbol.ZSType {
-    // std.debug.print("{}\n", .{});
     return switch (expr) {
         .number => Symbol.ZSType.number,
         .string => Symbol.ZSType.string,
         .call => self.analyzeCall(expr.call),
         .reference => self.analyzeReference(expr.reference),
+        .if_expr => self.analyzeIfExpr(expr.if_expr),
+        .binary => self.analyzeBinary(expr.binary),
+        .block => self.analyzeBlock(expr.block),
+        .return_expr => self.analyzeReturn(expr.return_expr),
     };
 }
 
@@ -90,6 +93,23 @@ fn analyzeVariable(self: *Self, variable: ast.stmt.ZSVar) !Symbol {
 fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
     const ret = try self.analyzeType(&function.ret);
     const args = try self.analyzeFnArgs(function.args);
+
+    if (function.body) |body| {
+        var scope = SymbolTable.init(self.allocator);
+        try self.tableStack.enterScope(&scope);
+        // Add args as symbols in the function scope
+        for (function.args) |arg| {
+            const argType = try self.analyzeType(&arg.type);
+            try self.tableStack.put(.{
+                .name = arg.name,
+                .assignable = false,
+                .signature = argType,
+            });
+        }
+        _ = try self.analyzeExpr(body);
+        _ = try self.tableStack.exitScope();
+    }
+
     return .{
         .name = function.name,
         .assignable = false,
@@ -144,6 +164,46 @@ fn analyzeReference(self: *Self, ref: ast.expr.ZSReference) !Symbol.ZSType {
     }
     try self.recordError(ref, "Reference not found");
     return Symbol.ZSType.unknown;
+}
+
+fn analyzeIfExpr(self: *Self, ifExpr: ast.expr.ZSIfExpr) Error!Symbol.ZSType {
+    _ = try self.analyzeExpr(ifExpr.condition.*);
+    const thenType = try self.analyzeExpr(ifExpr.then_branch.*);
+    if (ifExpr.else_branch) |eb| {
+        _ = try self.analyzeExpr(eb.*);
+    }
+    return thenType;
+}
+
+fn analyzeBinary(self: *Self, binary: ast.expr.ZSBinary) Error!Symbol.ZSType {
+    _ = try self.analyzeExpr(binary.lhs.*);
+    _ = try self.analyzeExpr(binary.rhs.*);
+    return Symbol.ZSType.number; // comparison result is a number (0 or 1)
+}
+
+fn analyzeBlock(self: *Self, block: ast.expr.ZSBlock) Error!Symbol.ZSType {
+    var lastType: Symbol.ZSType = .unknown;
+    for (block.stmts) |node| {
+        switch (node) {
+            .stmt => {
+                if (try self.analyzeStmt(node.stmt)) |symbol| {
+                    try self.tableStack.put(symbol);
+                }
+                lastType = .unknown;
+            },
+            .expr => {
+                lastType = try self.analyzeExpr(node.expr);
+            },
+        }
+    }
+    return lastType;
+}
+
+fn analyzeReturn(self: *Self, ret: ast.expr.ZSReturn) Error!Symbol.ZSType {
+    if (ret.value) |v| {
+        return try self.analyzeExpr(v.*);
+    }
+    return .unknown;
 }
 
 fn recordError(

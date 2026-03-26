@@ -16,7 +16,12 @@ pub const ZSStmt = union(ZSStmtType) {
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         switch (self.*) {
             .variable => self.variable.deinit(allocator),
-            .function => allocator.free(self.function.args),
+            .function => {
+                if (self.function.body) |*b| {
+                    b.deinit(allocator);
+                }
+                allocator.free(self.function.args);
+            },
         }
     }
 };

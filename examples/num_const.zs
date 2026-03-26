@@ -1,6 +1,13 @@
 external fn print(msg: string): void
 external fn print_number(n: number): void
 
-let a = 10
-const b = print("hello")
-const c = print_number(a)
+fn get_ten(): number = 10
+
+fn check(a: number): number {
+  if a == 10 { return 1 } else { return 0 }
+}
+
+let a = get_ten()
+const b = print_number(a)
+const c = check(a)
+const d = print_number(c)

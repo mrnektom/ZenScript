@@ -61,7 +61,7 @@ pub fn parse(self: *Self, allocator: std.mem.Allocator) !ZSModule {
 }
 
 fn nextNode(self: *Self) !?ZSAstNode {
-    if (!self.tokenizer.hasNext()) return null;
+    if (!self.tokenizer.hasNext() and self.peekedToken == null) return null;
     const stmt = self.nextStmt() catch |err| {
         if (try self.nextExpr()) |e| {
             return ZSAstNode{ .expr = e };
@@ -74,7 +74,7 @@ fn nextNode(self: *Self) !?ZSAstNode {
 }
 
 fn nextStmt(self: *Self) !?ast.stmt.ZSStmt {
-    if (!self.tokenizer.hasNext()) return null;
+    if (!self.tokenizer.hasNext() and self.peekedToken == null) return null;
     const modifiers = try self.nextModifiers();
     if (try self.nextVar()) |v| return ast.stmt.ZSStmt{ .variable = v };
     if (try self.nextFn(modifiers)) |f| return ast.stmt.ZSStmt{ .function = f };
@@ -83,19 +83,154 @@ fn nextStmt(self: *Self) !?ast.stmt.ZSStmt {
 
 fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
     const expr = blk: {
+        if (try self.nextIfExpr()) |e| break :blk ast.expr.ZSExpr{ .if_expr = e };
+        if (try self.nextReturn()) |r| break :blk ast.expr.ZSExpr{ .return_expr = r };
+        if (try self.nextBlock()) |b| break :blk ast.expr.ZSExpr{ .block = b };
         if (try self.nextNumber()) |n| break :blk ast.expr.ZSExpr{ .number = n };
         if (try self.nextReference()) |r| break :blk ast.expr.ZSExpr{ .reference = r };
         if (try self.nextString()) |s| break :blk ast.expr.ZSExpr{ .string = s };
         return null;
     };
 
+    // Check for call
     if (try self.nextCall(expr)) |call| {
-        return ast.expr.ZSExpr{ .call = call };
-    } else {
-        return expr;
+        const callExpr = ast.expr.ZSExpr{ .call = call };
+        // Check for binary op after call
+        if (try self.nextBinaryRhs(callExpr)) |bin| {
+            return ast.expr.ZSExpr{ .binary = bin };
+        }
+        return callExpr;
     }
 
-    return Error.UnknownToken;
+    // Check for binary op (==, !=)
+    if (try self.nextBinaryRhs(expr)) |bin| {
+        return ast.expr.ZSExpr{ .binary = bin };
+    }
+
+    return expr;
+}
+
+fn nextBinaryRhs(self: *Self, lhs: ast.expr.ZSExpr) Error!?ast.expr.ZSBinary {
+    const op = blk: {
+        if (self.checkToken("==") catch false) break :blk "==";
+        if (self.checkToken("!=") catch false) break :blk "!=";
+        return null;
+    };
+    self.shiftToken();
+    const rhs = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+
+    const lhsPtr = try self.allocator.create(ast.expr.ZSExpr);
+    lhsPtr.* = lhs;
+    const rhsPtr = try self.allocator.create(ast.expr.ZSExpr);
+    rhsPtr.* = rhs;
+
+    return ast.expr.ZSBinary{
+        .lhs = lhsPtr,
+        .op = op,
+        .rhs = rhsPtr,
+        .startPos = lhs.start(),
+        .endPos = rhs.end(),
+    };
+}
+
+fn nextIfExpr(self: *Self) Error!?ast.expr.ZSIfExpr {
+    if (!(self.checkToken("if") catch false)) return null;
+    const ifToken = try self.peekToken();
+    const startPos = ifToken.startPos;
+    self.shiftToken();
+
+    // Optional parens around condition
+    const hasParen = self.checkToken("(") catch false;
+    if (hasParen) self.shiftToken();
+
+    const condition = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+    const condPtr = try self.allocator.create(ast.expr.ZSExpr);
+    condPtr.* = condition;
+
+    if (hasParen) try self.expectToken(")");
+
+    // Then branch: block or expression
+    const thenExpr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+    const thenPtr = try self.allocator.create(ast.expr.ZSExpr);
+    thenPtr.* = thenExpr;
+
+    // Optional else branch
+    var elseBranch: ?*ast.expr.ZSExpr = null;
+    var endPos = thenExpr.end();
+    if (self.checkToken("else") catch false) {
+        self.shiftToken();
+        const elseExpr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+        const elsePtr = try self.allocator.create(ast.expr.ZSExpr);
+        elsePtr.* = elseExpr;
+        elseBranch = elsePtr;
+        endPos = elseExpr.end();
+    }
+
+    return ast.expr.ZSIfExpr{
+        .condition = condPtr,
+        .then_branch = thenPtr,
+        .else_branch = elseBranch,
+        .startPos = startPos,
+        .endPos = endPos,
+    };
+}
+
+fn nextReturn(self: *Self) Error!?ast.expr.ZSReturn {
+    if (!(self.checkToken("return") catch false)) return null;
+    const retToken = try self.peekToken();
+    const startPos = retToken.startPos;
+    self.shiftToken();
+
+    // Optional value — but don't consume } or else
+    var value: ?*ast.expr.ZSExpr = null;
+    var endPos = retToken.endPos;
+    if (!isBlockTerminator(self)) {
+        if (try self.nextExpr()) |expr| {
+            const ptr = try self.allocator.create(ast.expr.ZSExpr);
+            ptr.* = expr;
+            value = ptr;
+            endPos = expr.end();
+        }
+    }
+
+    return ast.expr.ZSReturn{
+        .value = value,
+        .startPos = startPos,
+        .endPos = endPos,
+    };
+}
+
+fn isBlockTerminator(self: *Self) bool {
+    const tok = self.peekToken() catch return true;
+    if (std.mem.eql(u8, tok.value, "}")) return true;
+    if (std.mem.eql(u8, tok.value, "else")) return true;
+    return false;
+}
+
+fn nextBlock(self: *Self) Error!?ast.expr.ZSBlock {
+    if (!(self.checkToken("{") catch false)) return null;
+    const startToken = try self.peekToken();
+    const startPos = startToken.startPos;
+    self.shiftToken();
+
+    var nodes = try std.ArrayList(ZSAstNode).initCapacity(self.allocator, 4);
+    defer nodes.deinit(self.allocator);
+
+    while (true) {
+        if (self.checkToken("}") catch false) break;
+        const node = try self.nextNode() orelse return Error.UnexpectedEndOfInput;
+        try nodes.append(self.allocator, node);
+    }
+
+    const endToken = try self.peekToken();
+    const endPos = endToken.endPos;
+    try self.expectToken("}");
+
+    return ast.expr.ZSBlock{
+        .stmts = try self.allocator.dupe(ZSAstNode, nodes.items),
+        .startPos = startPos,
+        .endPos = endPos,
+    };
 }
 
 fn nextVar(self: *Self) Error!?ast.stmt.ZSVar {
@@ -119,28 +254,44 @@ fn nextFn(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSFn {
     try self.expectToken("(");
     var args = try std.ArrayList(ast.stmt.ZSFn.Arg).initCapacity(self.allocator, 1);
     defer args.deinit(self.allocator);
-    while (true) {
-        const argName = try self.nextIdent();
-        const ty = try self.nextType();
-        const arg = ast.stmt.ZSFn.Arg{ .name = argName, .type = ty };
-        try args.append(self.allocator, arg);
 
-        if (try self.checkToken(",")) {
-            self.shiftToken();
-            continue;
+    // Handle empty arg list
+    if (!(self.checkToken(")") catch false)) {
+        while (true) {
+            const argName = try self.nextIdent();
+            const ty = try self.nextType();
+            const arg = ast.stmt.ZSFn.Arg{ .name = argName, .type = ty };
+            try args.append(self.allocator, arg);
+
+            if (try self.checkToken(",")) {
+                self.shiftToken();
+                continue;
+            }
+
+            break;
         }
-
-        break;
     }
     try self.expectToken(")");
 
     const ret = try self.nextType();
+
+    // Parse body: expression body (= expr), block body ({ ... }), or no body
+    var body: ?ast.expr.ZSExpr = null;
+    if (self.checkToken("=") catch false) {
+        self.shiftToken();
+        body = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+    } else if (self.checkToken("{") catch false) {
+        if (try self.nextBlock()) |blk| {
+            body = ast.expr.ZSExpr{ .block = blk };
+        }
+    }
 
     return ast.stmt.ZSFn{
         .name = name,
         .modifiers = modifiers,
         .args = try self.allocator.dupe(ast.stmt.ZSFn.Arg, args.items),
         .ret = ret,
+        .body = body,
     };
 }
 
@@ -198,6 +349,17 @@ fn nextReference(self: *Self) !?ast.expr.ZSReference {
     if (!self.checkIndent()) return null;
     const token = try self.peekToken();
     if (token.type != .ident) return Error.UnexpectedTokenType;
+    // Don't consume keywords that are handled elsewhere
+    if (std.mem.eql(u8, token.value, "if") or
+        std.mem.eql(u8, token.value, "return") or
+        std.mem.eql(u8, token.value, "else") or
+        std.mem.eql(u8, token.value, "let") or
+        std.mem.eql(u8, token.value, "const") or
+        std.mem.eql(u8, token.value, "fn") or
+        std.mem.eql(u8, token.value, "external"))
+    {
+        return null;
+    }
     self.shiftToken();
     const name = token.value;
     return ast.expr.ZSReference{
@@ -349,6 +511,7 @@ test "parse function declaration" {
     try std.testing.expectEqualStrings("int", f.args[0].type.?.reference);
     try std.testing.expectEqualStrings("void", f.ret.?.reference);
     try std.testing.expect(f.modifiers.external == null);
+    try std.testing.expect(f.body == null);
 }
 
 test "parse external function" {
@@ -361,6 +524,7 @@ test "parse external function" {
     try std.testing.expectEqualStrings("string", f.args[0].type.?.reference);
     try std.testing.expectEqualStrings("void", f.ret.?.reference);
     try std.testing.expect(f.modifiers.external != null);
+    try std.testing.expect(f.body == null);
 }
 
 test "parse number expression" {
@@ -396,4 +560,35 @@ test "parse function call expression" {
     try std.testing.expectEqual(@as(usize, 2), call.arguments.len);
     try std.testing.expectEqualStrings("1", call.arguments[0].number.value);
     try std.testing.expectEqualStrings("2", call.arguments[1].number.value);
+}
+
+test "parse function with expression body" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("fn get_ten(): number = 10");
+    defer module.deinit(allocator);
+    const f = module.ast[0].stmt.function;
+    try std.testing.expectEqualStrings("get_ten", f.name);
+    try std.testing.expectEqual(@as(usize, 0), f.args.len);
+    try std.testing.expectEqualStrings("number", f.ret.?.reference);
+    try std.testing.expect(f.body != null);
+    try std.testing.expectEqualStrings("10", f.body.?.number.value);
+}
+
+test "parse function with block body" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("fn foo(a: number): number { return a }");
+    defer module.deinit(allocator);
+    const f = module.ast[0].stmt.function;
+    try std.testing.expectEqualStrings("foo", f.name);
+    try std.testing.expect(f.body != null);
+    const blk = f.body.?.block;
+    try std.testing.expectEqual(@as(usize, 1), blk.stmts.len);
+}
+
+test "parse if else expression" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("fn check(a: number): number { if a == 10 { return 1 } else { return 0 } }");
+    defer module.deinit(allocator);
+    const f = module.ast[0].stmt.function;
+    try std.testing.expect(f.body != null);
 }
