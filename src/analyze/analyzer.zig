@@ -96,6 +96,7 @@ fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
 
     if (function.body) |body| {
         var scope = SymbolTable.init(self.allocator);
+        defer scope.deinit();
         try self.tableStack.enterScope(&scope);
         // Add args as symbols in the function scope
         for (function.args) |arg| {
