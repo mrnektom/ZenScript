@@ -10,13 +10,13 @@ instructions: *std.ArrayList(ir.ZSIR),
 allocator: std.mem.Allocator,
 nameCount: usize = 0,
 varNames: std.StringHashMap([]const u8),
-resolutions: *const std.StringHashMap([]const u8),
+resolutions: *const std.AutoHashMap(usize, []const u8),
 overloadedNames: *const std.StringHashMap(void),
 
 pub fn generateIr(
     module: *const zsm.ZSModule,
     allocator: std.mem.Allocator,
-    resolutions: *const std.StringHashMap([]const u8),
+    resolutions: *const std.AutoHashMap(usize, []const u8),
     overloadedNames: *const std.StringHashMap(void),
 ) !ir.ZSIRInstructions {
     var instructions = try std.ArrayList(ir.ZSIR).initCapacity(allocator, 5);
@@ -37,29 +37,7 @@ pub fn generateIr(
     return .{ .instructions = try allocator.dupe(ir.ZSIR, instructions.items) };
 }
 
-fn computeMangledName(allocator: std.mem.Allocator, name: []const u8, argTypes: []const []const u8) ![]const u8 {
-    var len: usize = name.len + 2;
-    for (argTypes, 0..) |argType, i| {
-        if (i > 0) len += 1;
-        len += argType.len;
-    }
-
-    const buf = try allocator.alloc(u8, len);
-    var pos: usize = 0;
-    @memcpy(buf[pos..][0..name.len], name);
-    pos += name.len;
-    @memcpy(buf[pos..][0..2], "__");
-    pos += 2;
-    for (argTypes, 0..) |argType, i| {
-        if (i > 0) {
-            buf[pos] = '_';
-            pos += 1;
-        }
-        @memcpy(buf[pos..][0..argType.len], argType);
-        pos += argType.len;
-    }
-    return buf;
-}
+const computeMangledName = @import("ZenScript").MangleHelpers.computeMangledName;
 
 fn generateNode(self: *Self, node: ast.ZSAstNode) ![]const u8 {
     return switch (node) {
@@ -99,9 +77,7 @@ fn generateCall(self: *Self, call: ast.expr.ZSCall) Error![]const u8 {
     }
 
     // Check if this call has a resolved overload name
-    const key = try std.fmt.allocPrint(self.allocator, "{}", .{call.startPos});
-    defer self.allocator.free(key);
-    if (self.resolutions.get(key)) |resolvedName| {
+    if (self.resolutions.get(call.startPos)) |resolvedName| {
         callerName = resolvedName;
     }
 

@@ -13,7 +13,7 @@ errors: *std.ArrayList(AnalyzeError),
 allocator: std.mem.Allocator,
 module: zsm.ZSModule,
 overloads: std.StringHashMap(std.ArrayList(OverloadEntry)),
-resolutions: std.StringHashMap([]const u8),
+resolutions: std.AutoHashMap(usize, []const u8),
 overloadedNames: std.StringHashMap(void),
 allocatedStrings: std.ArrayList([]const u8),
 allocatedTypes: std.ArrayList(*Symbol.ZSType),
@@ -31,7 +31,7 @@ const Error = error{} || std.mem.Allocator.Error || sts.Error;
 pub const AnalyzeResult = struct {
     exports: SymbolTable,
     errors: []AnalyzeError,
-    resolutions: std.StringHashMap([]const u8),
+    resolutions: std.AutoHashMap(usize, []const u8),
     overloadedNames: std.StringHashMap(void),
     allocatedStrings: std.ArrayList([]const u8),
     allocatedTypes: std.ArrayList(*Symbol.ZSType),
@@ -41,11 +41,6 @@ pub const AnalyzeResult = struct {
         allocator.free(self.errors);
         self.exports.deinit();
 
-        // Free resolution keys (heap-allocated startPos strings)
-        var resIter = self.resolutions.iterator();
-        while (resIter.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
-        }
         self.resolutions.deinit();
 
         self.overloadedNames.deinit();
@@ -70,30 +65,7 @@ pub const AnalyzeResult = struct {
     }
 };
 
-fn computeMangledName(allocator: std.mem.Allocator, name: []const u8, argTypes: []const []const u8) ![]const u8 {
-    // Calculate total length
-    var len: usize = name.len + 2; // name + "__"
-    for (argTypes, 0..) |argType, i| {
-        if (i > 0) len += 1; // "_" separator
-        len += argType.len;
-    }
-
-    const buf = try allocator.alloc(u8, len);
-    var pos: usize = 0;
-    @memcpy(buf[pos..][0..name.len], name);
-    pos += name.len;
-    @memcpy(buf[pos..][0..2], "__");
-    pos += 2;
-    for (argTypes, 0..) |argType, i| {
-        if (i > 0) {
-            buf[pos] = '_';
-            pos += 1;
-        }
-        @memcpy(buf[pos..][0..argType.len], argType);
-        pos += argType.len;
-    }
-    return buf;
-}
+const computeMangledName = @import("ZenScript").MangleHelpers.computeMangledName;
 
 fn typeToString(zsType: Symbol.ZSType) []const u8 {
     return switch (zsType) {
@@ -116,7 +88,7 @@ pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator) !AnalyzeResul
         .allocator = allocator,
         .module = module,
         .overloads = std.StringHashMap(std.ArrayList(OverloadEntry)).init(allocator),
-        .resolutions = std.StringHashMap([]const u8).init(allocator),
+        .resolutions = std.AutoHashMap(usize, []const u8).init(allocator),
         .overloadedNames = std.StringHashMap(void).init(allocator),
         .allocatedStrings = try std.ArrayList([]const u8).initCapacity(allocator, 8),
         .allocatedTypes = try std.ArrayList(*Symbol.ZSType).initCapacity(allocator, 4),
@@ -209,17 +181,8 @@ fn registerFunction(self: *Self, func: ast.stmt.ZSFn) !void {
                     }
                 }
                 if (allMatch) {
-                    const root = @import("ZenScript");
                     const nameStart = @intFromPtr(func.name.ptr) - @intFromPtr(self.module.source.ptr);
-                    try self.errors.append(self.allocator, .{
-                        .message = "Duplicate function signature",
-                        .filename = self.module.filename,
-                        .start = nameStart,
-                        .end = nameStart + func.name.len,
-                        .codeLine = root.SourceHelpers.computeSourceLine(self.module.source, nameStart),
-                        .lineNumber = root.SourceHelpers.computeLineNumber(self.module.source, nameStart),
-                        .lineCol = root.SourceHelpers.computeLineOffset(self.module.source, nameStart),
-                    });
+                    try self.recordErrorAt(nameStart, nameStart + func.name.len, "Duplicate function signature");
                     return;
                 }
             }
@@ -306,32 +269,14 @@ fn analyzeVariable(self: *Self, variable: ast.stmt.ZSVar) !Symbol {
 
 fn analyzeReassign(self: *Self, reassign: ast.stmt.ZSReassign) !void {
     _ = try self.analyzeExpr(reassign.expr);
+    const nameStart = @intFromPtr(reassign.name.ptr) - @intFromPtr(self.module.source.ptr);
+    const nameEnd = nameStart + reassign.name.len;
     if (self.tableStack.get(reassign.name)) |sym| {
         if (!sym.assignable) {
-            const root = @import("ZenScript");
-            const nameStart = @intFromPtr(reassign.name.ptr) - @intFromPtr(self.module.source.ptr);
-            try self.errors.append(self.allocator, .{
-                .message = "Cannot reassign const variable",
-                .filename = self.module.filename,
-                .start = nameStart,
-                .end = nameStart + reassign.name.len,
-                .codeLine = root.SourceHelpers.computeSourceLine(self.module.source, nameStart),
-                .lineNumber = root.SourceHelpers.computeLineNumber(self.module.source, nameStart),
-                .lineCol = root.SourceHelpers.computeLineOffset(self.module.source, nameStart),
-            });
+            try self.recordErrorAt(nameStart, nameEnd, "Cannot reassign const variable");
         }
     } else {
-        const root = @import("ZenScript");
-        const nameStart = @intFromPtr(reassign.name.ptr) - @intFromPtr(self.module.source.ptr);
-        try self.errors.append(self.allocator, .{
-            .message = "Reference not found",
-            .filename = self.module.filename,
-            .start = nameStart,
-            .end = nameStart + reassign.name.len,
-            .codeLine = root.SourceHelpers.computeSourceLine(self.module.source, nameStart),
-            .lineNumber = root.SourceHelpers.computeLineNumber(self.module.source, nameStart),
-            .lineCol = root.SourceHelpers.computeLineOffset(self.module.source, nameStart),
-        });
+        try self.recordErrorAt(nameStart, nameEnd, "Reference not found");
     }
 }
 
@@ -438,9 +383,7 @@ fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
                 else
                     name;
 
-                // Store resolution keyed by call startPos
-                const key = try std.fmt.allocPrint(self.allocator, "{}", .{call.startPos});
-                try self.resolutions.put(key, resolvedName);
+                try self.resolutions.put(call.startPos, resolvedName);
 
                 return entry.retType;
             } else {
@@ -515,16 +458,23 @@ fn recordError(
     expr: anytype,
     message: []const u8,
 ) Error!void {
+    try self.recordErrorAt(expr.startPos, expr.endPos, message);
+}
+
+fn recordErrorAt(
+    self: *Self,
+    start: usize,
+    end: usize,
+    message: []const u8,
+) Error!void {
     const root = @import("ZenScript");
-    const startPos = expr.startPos;
-    const endPos = expr.endPos;
     try self.errors.append(self.allocator, .{
         .message = message,
         .filename = self.module.filename,
-        .start = startPos,
-        .end = endPos,
-        .codeLine = root.SourceHelpers.computeSourceLine(self.module.source, startPos),
-        .lineNumber = root.SourceHelpers.computeLineNumber(self.module.source, startPos),
-        .lineCol = root.SourceHelpers.computeLineOffset(self.module.source, startPos),
+        .start = start,
+        .end = end,
+        .codeLine = root.SourceHelpers.computeSourceLine(self.module.source, start),
+        .lineNumber = root.SourceHelpers.computeLineNumber(self.module.source, start),
+        .lineCol = root.SourceHelpers.computeLineOffset(self.module.source, start),
     });
 }

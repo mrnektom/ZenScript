@@ -16,7 +16,7 @@ pub fn collectArgs() Error!ExecutionArgs {
             if (filePathOpt) |filePath| {
                 execArgs.entryPoint = filePath;
             } else {
-                std.debug.print("Expected file path but got end of arguments", .{});
+                return Error.MissingEntryPoint;
             }
         } else if (std.mem.eql(u8, arg, "-dump-ir")) {
             execArgs.dumpIr = true;

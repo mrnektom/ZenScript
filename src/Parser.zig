@@ -19,14 +19,14 @@ const Error = error{ UnexpectedTokenType, UnexpectedToken, NotShiftedToken } || 
 pub fn create(
     allocator: std.mem.Allocator,
     tokenizer: Tokenizer,
-    filemane: []const u8,
+    filename: []const u8,
     source: []const u8,
 ) !Self {
     return .{
         .tokenizer = tokenizer,
         .peekedToken = null,
         .allocator = allocator,
-        .filename = filemane,
+        .filename = filename,
         .source = source,
     };
 }
@@ -97,7 +97,7 @@ fn nextReassign(self: *Self) Error!?ast.stmt.ZSReassign {
     self.shiftToken();
 
     // Check for '='
-    if (self.checkToken("=") catch false) {
+    if (self.checkToken("=")) {
         self.shiftToken();
         const expr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
         return ast.stmt.ZSReassign{ .name = name, .expr = expr };
@@ -150,8 +150,8 @@ fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
 
 fn nextBinaryRhs(self: *Self, lhs: ast.expr.ZSExpr) Error!?ast.expr.ZSBinary {
     const op = blk: {
-        if (self.checkToken("==") catch false) break :blk "==";
-        if (self.checkToken("!=") catch false) break :blk "!=";
+        if (self.checkToken("==")) break :blk "==";
+        if (self.checkToken("!=")) break :blk "!=";
         return null;
     };
     self.shiftToken();
@@ -172,13 +172,13 @@ fn nextBinaryRhs(self: *Self, lhs: ast.expr.ZSExpr) Error!?ast.expr.ZSBinary {
 }
 
 fn nextIfExpr(self: *Self) Error!?ast.expr.ZSIfExpr {
-    if (!(self.checkToken("if") catch false)) return null;
+    if (!(self.checkToken("if"))) return null;
     const ifToken = try self.peekToken();
     const startPos = ifToken.startPos;
     self.shiftToken();
 
     // Optional parens around condition
-    const hasParen = self.checkToken("(") catch false;
+    const hasParen = self.checkToken("(");
     if (hasParen) self.shiftToken();
 
     const condition = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
@@ -195,7 +195,7 @@ fn nextIfExpr(self: *Self) Error!?ast.expr.ZSIfExpr {
     // Optional else branch
     var elseBranch: ?*ast.expr.ZSExpr = null;
     var endPos = thenExpr.end();
-    if (self.checkToken("else") catch false) {
+    if (self.checkToken("else")) {
         self.shiftToken();
         const elseExpr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
         const elsePtr = try self.allocator.create(ast.expr.ZSExpr);
@@ -214,7 +214,7 @@ fn nextIfExpr(self: *Self) Error!?ast.expr.ZSIfExpr {
 }
 
 fn nextReturn(self: *Self) Error!?ast.expr.ZSReturn {
-    if (!(self.checkToken("return") catch false)) return null;
+    if (!(self.checkToken("return"))) return null;
     const retToken = try self.peekToken();
     const startPos = retToken.startPos;
     self.shiftToken();
@@ -246,7 +246,7 @@ fn isBlockTerminator(self: *Self) bool {
 }
 
 fn nextBlock(self: *Self) Error!?ast.expr.ZSBlock {
-    if (!(self.checkToken("{") catch false)) return null;
+    if (!(self.checkToken("{"))) return null;
     const startToken = try self.peekToken();
     const startPos = startToken.startPos;
     self.shiftToken();
@@ -255,7 +255,7 @@ fn nextBlock(self: *Self) Error!?ast.expr.ZSBlock {
     defer nodes.deinit(self.allocator);
 
     while (true) {
-        if (self.checkToken("}") catch false) break;
+        if (self.checkToken("}")) break;
         const node = try self.nextNode() orelse return Error.UnexpectedEndOfInput;
         try nodes.append(self.allocator, node);
     }
@@ -273,8 +273,8 @@ fn nextBlock(self: *Self) Error!?ast.expr.ZSBlock {
 
 fn nextVar(self: *Self) Error!?ast.stmt.ZSVar {
     const varType = block: {
-        if (try self.checkToken("const")) break :block VarType.Const;
-        if (try self.checkToken("let")) break :block VarType.Let;
+        if (self.checkToken("const")) break :block VarType.Const;
+        if (self.checkToken("let")) break :block VarType.Let;
         return null;
     };
     self.shiftToken();
@@ -286,7 +286,7 @@ fn nextVar(self: *Self) Error!?ast.stmt.ZSVar {
 }
 
 fn nextFn(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSFn {
-    if (!try self.checkToken("fn")) return null;
+    if (!self.checkToken("fn")) return null;
     self.shiftToken();
     const name = try self.nextIdent();
     try self.expectToken("(");
@@ -294,14 +294,14 @@ fn nextFn(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSFn {
     defer args.deinit(self.allocator);
 
     // Handle empty arg list
-    if (!(self.checkToken(")") catch false)) {
+    if (!(self.checkToken(")"))) {
         while (true) {
             const argName = try self.nextIdent();
             const ty = try self.nextType();
             const arg = ast.stmt.ZSFn.Arg{ .name = argName, .type = ty };
             try args.append(self.allocator, arg);
 
-            if (try self.checkToken(",")) {
+            if (self.checkToken(",")) {
                 self.shiftToken();
                 continue;
             }
@@ -315,10 +315,10 @@ fn nextFn(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSFn {
 
     // Parse body: expression body (= expr), block body ({ ... }), or no body
     var body: ?ast.expr.ZSExpr = null;
-    if (self.checkToken("=") catch false) {
+    if (self.checkToken("=")) {
         self.shiftToken();
         body = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
-    } else if (self.checkToken("{") catch false) {
+    } else if (self.checkToken("{")) {
         if (try self.nextBlock()) |blk| {
             body = ast.expr.ZSExpr{ .block = blk };
         }
@@ -334,7 +334,7 @@ fn nextFn(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSFn {
 }
 
 fn nextType(self: *Self) !?ast.ZSType {
-    if (!try self.checkToken(":")) return null;
+    if (!self.checkToken(":")) return null;
     self.shiftToken();
 
     const typeName = try self.nextIdent();
@@ -358,13 +358,13 @@ fn nextModifiers(self: *Self) Error!ast.stmt.Modifiers {
 }
 
 fn nextCall(self: *Self, subject: ast.expr.ZSExpr) Error!?ast.expr.ZSCall {
-    if (!try self.checkToken("(")) return null;
+    if (!self.checkToken("(")) return null;
     self.shiftToken();
     var args = try std.ArrayList(ast.expr.ZSExpr).initCapacity(self.allocator, 5);
     defer args.deinit(self.allocator);
     while (try self.nextExpr()) |arg| {
         try args.append(self.allocator, arg);
-        if (try self.checkToken(",")) {
+        if (self.checkToken(",")) {
             self.shiftToken();
             continue;
         }
@@ -484,8 +484,8 @@ fn expectToken(self: *Self, value: []const u8) !void {
     self.shiftToken();
 }
 
-fn checkToken(self: *Self, value: []const u8) !bool {
-    const token = try self.peekToken();
+fn checkToken(self: *Self, value: []const u8) bool {
+    const token = self.peekToken() catch return false;
     return std.mem.eql(u8, token.value, value);
 }
 

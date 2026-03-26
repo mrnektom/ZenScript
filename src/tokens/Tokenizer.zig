@@ -19,12 +19,6 @@ fn peek(self: *Tokenizer) ?u8 {
     return self.input[self.position];
 }
 
-fn advance(self: *Tokenizer) ?u8 {
-    const ch = self.peek();
-    if (ch != null) self.pos += 1;
-    return ch;
-}
-
 fn shift(self: *Tokenizer) void {
     if (self.hasNext()) self.position += 1;
 }
@@ -38,17 +32,6 @@ fn skipWhitespace(self: *Tokenizer) void {
         if (!std.ascii.isWhitespace(c)) break;
         self.shift();
     }
-}
-
-fn readNumber(self: *Tokenizer) []const u8 {
-    const start = self.pos;
-
-    while (self.peek()) |c| {
-        if (!std.ascii.isDigit(c)) break;
-        self.shift();
-    }
-
-    return self.input[start..self.pos];
 }
 
 fn currentTokenType(self: *Tokenizer) Error!?TokenType {
