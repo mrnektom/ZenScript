@@ -55,7 +55,7 @@ fn currentTokenType(self: *Tokenizer) Error!?TokenType {
     const firstChar = self.peek() orelse return null;
     return switch (firstChar) {
         '=' => .punctuation,
-        '(', ')' => .punctuation,
+        '(', ')', ':' => .punctuation,
         '"' => .string,
         else => e: {
             if (std.ascii.isDigit(firstChar)) {
@@ -115,7 +115,7 @@ fn eatString(self: *Tokenizer) !void {
 fn eatPunc(self: *Tokenizer) void {
     switch (self.peek() orelse return) {
         '=' => self.shift(),
-        '(', ')' => self.shift(),
+        '(', ')', ':' => self.shift(),
 
         else => {},
     }
@@ -156,4 +156,87 @@ pub fn next(self: *Tokenizer) Error!?ZSToken {
         .value = value,
         .source = self.input,
     };
+}
+
+// --- Tests ---
+
+test "tokenize identifier" {
+    var t = Tokenizer.create("hello");
+    const tok = (try t.next()).?;
+    try std.testing.expectEqual(TokenType.ident, tok.type);
+    try std.testing.expectEqualStrings("hello", tok.value);
+    try std.testing.expect((try t.next()) == null);
+}
+
+test "tokenize integer number" {
+    var t = Tokenizer.create("42");
+    const tok = (try t.next()).?;
+    try std.testing.expectEqual(TokenType.numeric, tok.type);
+    try std.testing.expectEqualStrings("42", tok.value);
+}
+
+test "tokenize float number" {
+    var t = Tokenizer.create("3.14");
+    const tok = (try t.next()).?;
+    try std.testing.expectEqual(TokenType.numeric, tok.type);
+    try std.testing.expectEqualStrings("3.14", tok.value);
+    try std.testing.expect((try t.next()) == null);
+}
+
+test "tokenize string" {
+    var t = Tokenizer.create("\"hello\"");
+    const tok = (try t.next()).?;
+    try std.testing.expectEqual(TokenType.string, tok.type);
+    try std.testing.expectEqualStrings("\"hello\"", tok.value);
+}
+
+test "tokenize punctuation" {
+    const puncs = [_][]const u8{ "=", "(", ")", ":" };
+    for (puncs) |p| {
+        var t = Tokenizer.create(p);
+        const tok = (try t.next()).?;
+        try std.testing.expectEqual(TokenType.punctuation, tok.type);
+        try std.testing.expectEqualStrings(p, tok.value);
+    }
+}
+
+test "skip whitespace" {
+    var t = Tokenizer.create("  hello  ");
+    const tok = (try t.next()).?;
+    try std.testing.expectEqual(TokenType.ident, tok.type);
+    try std.testing.expectEqualStrings("hello", tok.value);
+    try std.testing.expect((try t.next()) == null);
+}
+
+test "multiple tokens" {
+    var t = Tokenizer.create("let x = 10");
+    const expected = [_]struct { tt: TokenType, val: []const u8 }{
+        .{ .tt = .ident, .val = "let" },
+        .{ .tt = .ident, .val = "x" },
+        .{ .tt = .punctuation, .val = "=" },
+        .{ .tt = .numeric, .val = "10" },
+    };
+    for (expected) |exp| {
+        const tok = (try t.next()).?;
+        try std.testing.expectEqual(exp.tt, tok.type);
+        try std.testing.expectEqualStrings(exp.val, tok.value);
+    }
+    try std.testing.expect((try t.next()) == null);
+}
+
+test "empty input" {
+    var t = Tokenizer.create("");
+    try std.testing.expect((try t.next()) == null);
+}
+
+test "unknown token error" {
+    var t = Tokenizer.create("@");
+    const result = t.next();
+    try std.testing.expectError(Error.UnknownToken, result);
+}
+
+test "unterminated string error" {
+    var t = Tokenizer.create("\"hello");
+    const result = t.next();
+    try std.testing.expectError(Error.UnexpectedEndOfInput, result);
 }

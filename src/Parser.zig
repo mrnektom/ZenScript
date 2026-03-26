@@ -75,7 +75,9 @@ fn nextNode(self: *Self) !?ZSAstNode {
 
 fn nextStmt(self: *Self) !?ast.stmt.ZSStmt {
     if (!self.tokenizer.hasNext()) return null;
+    const modifiers = try self.nextModifiers();
     if (try self.nextVar()) |v| return ast.stmt.ZSStmt{ .variable = v };
+    if (try self.nextFn(modifiers)) |f| return ast.stmt.ZSStmt{ .function = f };
     return Error.UnknownToken;
 }
 
@@ -103,11 +105,66 @@ fn nextVar(self: *Self) Error!?ast.stmt.ZSVar {
         return null;
     };
     self.shiftToken();
-    const name = try self.nextIdent() orelse return Error.UnexpectedEndOfInput;
+    const name = try self.nextIdent();
     try self.expectToken("=");
     const expr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
 
     return ast.stmt.ZSVar{ .type = varType, .name = name, .expr = expr };
+}
+
+fn nextFn(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSFn {
+    if (!try self.checkToken("fn")) return null;
+    self.shiftToken();
+    const name = try self.nextIdent();
+    try self.expectToken("(");
+    var args = try std.ArrayList(ast.stmt.ZSFn.Arg).initCapacity(self.allocator, 1);
+    defer args.deinit(self.allocator);
+    while (true) {
+        const argName = try self.nextIdent();
+        const ty = try self.nextType();
+        const arg = ast.stmt.ZSFn.Arg{ .name = argName, .type = ty };
+        try args.append(self.allocator, arg);
+
+        if (try self.checkToken(",")) {
+            self.shiftToken();
+            continue;
+        }
+
+        break;
+    }
+    try self.expectToken(")");
+
+    const ret = try self.nextType();
+
+    return ast.stmt.ZSFn{
+        .name = name,
+        .modifiers = modifiers,
+        .args = args.items,
+        .ret = ret,
+    };
+}
+
+fn nextType(self: *Self) !?ast.ZSType {
+    if (!try self.checkToken(":")) return null;
+    self.shiftToken();
+
+    const typeName = try self.nextIdent();
+
+    return ast.ZSType{ .reference = typeName };
+}
+
+fn nextModifiers(self: *Self) Error!ast.stmt.Modifiers {
+    var external: ?ast.stmt.Modifier = null;
+    while (true) {
+        const token = try self.peekToken();
+        if (std.mem.eql(u8, token.value, "external")) {
+            if (external) |_| break;
+            external = ast.stmt.Modifier{ .start = token.startPos, .end = token.endPos };
+        } else {
+            break;
+        }
+    }
+    return ast.stmt.Modifiers{ .external = external };
 }
 
 fn nextCall(self: *Self, subject: ast.expr.ZSExpr) Error!?ast.expr.ZSCall {
@@ -154,7 +211,7 @@ fn checkIndent(self: *Self) bool {
     return token.type == .ident;
 }
 
-fn nextIdent(self: *Self) !?[]const u8 {
+fn nextIdent(self: *Self) ![]const u8 {
     const token = try self.peekToken();
 
     if (token.type != .ident) return Error.UnexpectedTokenType;
@@ -229,4 +286,113 @@ fn printError(self: *Self, err: Error) Error!void {
 
         else => return err,
     }
+}
+
+// --- Tests ---
+
+fn testParse(source: []const u8) !ZSModule {
+    const allocator = std.testing.allocator;
+    const tokenizer = Tokenizer.create(source);
+    var parser = try Self.create(allocator, tokenizer, "test.zs", source);
+    return try parser.parse(allocator);
+}
+
+test "parse empty input" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("");
+    defer module.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), module.ast.len);
+}
+
+test "parse let variable with number" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("let x = 10");
+    defer module.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), module.ast.len);
+    const node = module.ast[0];
+    const v = node.stmt.variable;
+    try std.testing.expectEqual(VarType.Let, v.type);
+    try std.testing.expectEqualStrings("x", v.name);
+    try std.testing.expectEqualStrings("10", v.expr.number.value);
+}
+
+test "parse const variable" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("const y = 42");
+    defer module.deinit(allocator);
+    const v = module.ast[0].stmt.variable;
+    try std.testing.expectEqual(VarType.Const, v.type);
+    try std.testing.expectEqualStrings("y", v.name);
+    try std.testing.expectEqualStrings("42", v.expr.number.value);
+}
+
+test "parse variable with string" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("let s = \"hello\"");
+    defer module.deinit(allocator);
+    const v = module.ast[0].stmt.variable;
+    try std.testing.expectEqual(VarType.Let, v.type);
+    try std.testing.expectEqualStrings("s", v.name);
+    try std.testing.expectEqualStrings("hello", v.expr.string.value);
+}
+
+test "parse function declaration" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("fn foo(x: int): void");
+    defer module.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), module.ast.len);
+    const f = module.ast[0].stmt.function;
+    try std.testing.expectEqualStrings("foo", f.name);
+    try std.testing.expectEqual(@as(usize, 1), f.args.len);
+    try std.testing.expectEqualStrings("x", f.args[0].name);
+    try std.testing.expectEqualStrings("int", f.args[0].type.?.reference);
+    try std.testing.expectEqualStrings("void", f.ret.?.reference);
+    try std.testing.expect(f.modifiers.external == null);
+}
+
+test "parse external function" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("external fn print(msg: string): void");
+    defer module.deinit(allocator);
+    const f = module.ast[0].stmt.function;
+    try std.testing.expectEqualStrings("print", f.name);
+    try std.testing.expectEqualStrings("msg", f.args[0].name);
+    try std.testing.expectEqualStrings("string", f.args[0].type.?.reference);
+    try std.testing.expectEqualStrings("void", f.ret.?.reference);
+    try std.testing.expect(f.modifiers.external != null);
+}
+
+test "parse number expression" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("let a = 99");
+    defer module.deinit(allocator);
+    try std.testing.expectEqualStrings("99", module.ast[0].stmt.variable.expr.number.value);
+}
+
+test "parse string expression" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("let b = \"world\"");
+    defer module.deinit(allocator);
+    try std.testing.expectEqualStrings("world", module.ast[0].stmt.variable.expr.string.value);
+}
+
+test "parse multiple statements" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("let a = 1 let b = 2");
+    defer module.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), module.ast.len);
+    try std.testing.expectEqualStrings("a", module.ast[0].stmt.variable.name);
+    try std.testing.expectEqualStrings("b", module.ast[1].stmt.variable.name);
+}
+
+test "parse function call expression" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("let r = foo(1, 2)");
+    defer module.deinit(allocator);
+    const expr = module.ast[0].stmt.variable.expr;
+    const call = expr.call;
+    try std.testing.expectEqualStrings("foo", call.subject.reference.name);
+    try std.testing.expectEqual(@as(usize, 2), call.arguments.len);
+    try std.testing.expectEqualStrings("1", call.arguments[0].number.value);
+    try std.testing.expectEqualStrings("2", call.arguments[1].number.value);
 }
