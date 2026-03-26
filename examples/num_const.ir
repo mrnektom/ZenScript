@@ -3,15 +3,62 @@ source_filename = "zs_module"
 
 define void @init() {
 entry:
-  %x = alloca i32, align 4
-  store i32 10, ptr %x, align 4
-  %strVal = alloca [5 x i8], align 1
-  store [5 x i8] c"hello", ptr %strVal, align 1
-  %x1 = alloca { i32, ptr }, align 8
-  store { i32 } { i32 5 }, ptr %x1, align 4
-  %arg = load { i32, ptr }, ptr %x1, align 8
-  call void @print({ i32, ptr } %arg)
+  %call_result = call i32 @get_ten()
+  %callres = alloca i32, align 4
+  store i32 %call_result, ptr %callres, align 4
+  %arg = load i32, ptr %callres, align 4
+  %call_result1 = call i32 @check(i32 %arg)
+  %callres2 = alloca i32, align 4
+  store i32 %call_result1, ptr %callres2, align 4
+  %arg3 = load i32, ptr %callres2, align 4
+  call void @print_number(i32 %arg3)
   ret void
 }
 
 declare void @print({ i32, ptr })
+
+declare void @print_number(i32)
+
+define i32 @get_ten() {
+entry:
+  %x = alloca i32, align 4
+  store i32 10, ptr %x, align 4
+  %retval = load i32, ptr %x, align 4
+  ret i32 %retval
+}
+
+define i32 @check(i32 %0) {
+entry:
+  %a = alloca i32, align 4
+  store i32 %0, ptr %a, align 4
+  %x = alloca i32, align 4
+  store i32 10, ptr %x, align 4
+  %lhs = load i32, ptr %a, align 4
+  %rhs = load i32, ptr %x, align 4
+  %cmp = icmp eq i32 %lhs, %rhs
+  %cmpext = zext i1 %cmp to i32
+  %cmpres = alloca i32, align 4
+  store i32 %cmpext, ptr %cmpres, align 4
+  %cond = load i32, ptr %cmpres, align 4
+  %ifres = alloca i32, align 4
+  %condbool = icmp ne i32 %cond, 0
+  br i1 %condbool, label %then, label %else
+
+then:                                             ; preds = %entry
+  %x1 = alloca i32, align 4
+  store i32 1, ptr %x1, align 4
+  %thenval = load i32, ptr %x1, align 4
+  store i32 %thenval, ptr %ifres, align 4
+  br label %merge
+
+else:                                             ; preds = %entry
+  %x2 = alloca i32, align 4
+  store i32 0, ptr %x2, align 4
+  %elseval = load i32, ptr %x2, align 4
+  store i32 %elseval, ptr %ifres, align 4
+  br label %merge
+
+merge:                                            ; preds = %else, %then
+  %retval = load i32, ptr %ifres, align 4
+  ret i32 %retval
+}

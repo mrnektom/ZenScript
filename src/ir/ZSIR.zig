@@ -134,12 +134,16 @@ pub const ZSIRBranch = struct {
     condition: []const u8,
     thenBody: []ZSIR,
     elseBody: []ZSIR,
+    resultName: ?[]const u8,
+    thenResult: ?[]const u8,
+    elseResult: ?[]const u8,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         for (self.thenBody) |inst| inst.deinit(allocator);
         allocator.free(self.thenBody);
         for (self.elseBody) |inst| inst.deinit(allocator);
         allocator.free(self.elseBody);
+        if (self.resultName) |n| allocator.free(n);
     }
 };
 

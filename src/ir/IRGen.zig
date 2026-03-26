@@ -181,16 +181,27 @@ fn generateIfExpr(self: *Self, ifExpr: ast.expr.ZSIfExpr) Error![]const u8 {
     defer thenInstructions.deinit(self.allocator);
     const outerInstructions = self.instructions;
     self.instructions = &thenInstructions;
-    _ = try self.generateExpr(ifExpr.then_branch.*);
+    const thenResult = try self.generateExpr(ifExpr.then_branch.*);
     self.instructions = outerInstructions;
 
     // Generate else body
     var elseInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
     defer elseInstructions.deinit(self.allocator);
+    var elseResult: ?[]const u8 = null;
     if (ifExpr.else_branch) |eb| {
         self.instructions = &elseInstructions;
-        _ = try self.generateExpr(eb.*);
+        elseResult = try self.generateExpr(eb.*);
         self.instructions = outerInstructions;
+    }
+
+    // Determine if branches produce values (non-empty result, not a block with returns)
+    const thenHasValue = thenResult.len > 0;
+    const elseHasValue = if (elseResult) |er| er.len > 0 else false;
+    const hasResult = thenHasValue and elseHasValue;
+
+    var resultName: ?[]const u8 = null;
+    if (hasResult) {
+        resultName = try self.generateName();
     }
 
     try self.instructions.append(
@@ -200,10 +211,13 @@ fn generateIfExpr(self: *Self, ifExpr: ast.expr.ZSIfExpr) Error![]const u8 {
                 .condition = condName,
                 .thenBody = try self.allocator.dupe(ir.ZSIR, thenInstructions.items),
                 .elseBody = try self.allocator.dupe(ir.ZSIR, elseInstructions.items),
+                .resultName = resultName,
+                .thenResult = if (thenHasValue) thenResult else null,
+                .elseResult = elseResult,
             },
         },
     );
-    return "";
+    return resultName orelse "";
 }
 
 fn generateBinary(self: *Self, binary: ast.expr.ZSBinary) Error![]const u8 {

@@ -194,6 +194,13 @@ fn generateBranch(
         return;
     }
 
+    // If this branch produces a value, allocate storage for the result before branching
+    var resultPtr: types.LLVMValueRef = null;
+    const resultTy = core.LLVMInt32Type();
+    if (branch.resultName != null) {
+        resultPtr = core.LLVMBuildAlloca(builder, resultTy, "ifres");
+    }
+
     // Convert to i1 (condition != 0)
     const condBool = core.LLVMBuildICmp(
         builder,
@@ -215,9 +222,17 @@ fn generateBranch(
     for (branch.thenBody) |inst| {
         try generateInstruction(builder, module, locals, &inst, allocator);
     }
-    // Only branch to merge if no terminator (e.g. return)
+    // Store then result if producing a value
     const thenTerm = core.LLVMGetBasicBlockTerminator(core.LLVMGetInsertBlock(builder));
     if (thenTerm == null) {
+        if (resultPtr != null) {
+            if (branch.thenResult) |thenResName| {
+                if (locals.get(thenResName)) |local| {
+                    const val = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "thenval");
+                    _ = core.LLVMBuildStore(builder, val, resultPtr);
+                }
+            }
+        }
         _ = core.LLVMBuildBr(builder, mergeBlock);
     }
 
@@ -228,11 +243,24 @@ fn generateBranch(
     }
     const elseTerm = core.LLVMGetBasicBlockTerminator(core.LLVMGetInsertBlock(builder));
     if (elseTerm == null) {
+        if (resultPtr != null) {
+            if (branch.elseResult) |elseResName| {
+                if (locals.get(elseResName)) |local| {
+                    const val = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "elseval");
+                    _ = core.LLVMBuildStore(builder, val, resultPtr);
+                }
+            }
+        }
         _ = core.LLVMBuildBr(builder, mergeBlock);
     }
 
     // Merge block
     core.LLVMPositionBuilderAtEnd(builder, mergeBlock);
+
+    // Register result in locals
+    if (branch.resultName) |resName| {
+        try locals.put(resName, LocalVar{ .ptr = resultPtr, .ty = resultTy });
+    }
 }
 
 fn generateCompare(
