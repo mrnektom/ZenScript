@@ -105,6 +105,7 @@ pub const ZSIRFnDecl = struct {
     external: bool,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
         allocator.free(self.argTypes);
     }
 };
@@ -119,6 +120,7 @@ pub const ZSIRFnDef = struct {
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         for (self.body) |inst| inst.deinit(allocator);
         allocator.free(self.body);
+        allocator.free(self.name);
         allocator.free(self.argTypes);
         allocator.free(self.argNames);
     }

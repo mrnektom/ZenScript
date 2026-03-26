@@ -49,7 +49,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
     }
     if (analyzeResult.errors.len == 0) {
         std.debug.print("Generating ir\n", .{});
-        const ir = try IRGen.generateIr(&module, allocator);
+        const ir = try IRGen.generateIr(&module, allocator, &analyzeResult.resolutions, &analyzeResult.overloadedNames);
         defer ir.deinit(allocator);
 
         if (args.dumpIr or args.run) {

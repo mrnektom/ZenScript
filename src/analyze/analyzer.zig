@@ -12,18 +12,97 @@ tableStack: *sts,
 errors: *std.ArrayList(AnalyzeError),
 allocator: std.mem.Allocator,
 module: zsm.ZSModule,
+overloads: std.StringHashMap(std.ArrayList(OverloadEntry)),
+resolutions: std.StringHashMap([]const u8),
+overloadedNames: std.StringHashMap(void),
+allocatedStrings: std.ArrayList([]const u8),
+allocatedTypes: std.ArrayList(*Symbol.ZSType),
+allocatedSliceLists: std.ArrayList([]const []const u8),
+
+const OverloadEntry = struct {
+    argTypes: []const []const u8,
+    mangledName: []const u8,
+    retType: Symbol.ZSType,
+    external: bool,
+};
 
 const Error = error{} || std.mem.Allocator.Error || sts.Error;
 
 pub const AnalyzeResult = struct {
     exports: SymbolTable,
     errors: []AnalyzeError,
+    resolutions: std.StringHashMap([]const u8),
+    overloadedNames: std.StringHashMap(void),
+    allocatedStrings: std.ArrayList([]const u8),
+    allocatedTypes: std.ArrayList(*Symbol.ZSType),
+    allocatedSliceLists: std.ArrayList([]const []const u8),
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         allocator.free(self.errors);
         self.exports.deinit();
+
+        // Free resolution keys (heap-allocated startPos strings)
+        var resIter = self.resolutions.iterator();
+        while (resIter.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+        }
+        self.resolutions.deinit();
+
+        self.overloadedNames.deinit();
+
+        // Free all tracked heap-allocated strings (mangled names)
+        for (self.allocatedStrings.items) |s| {
+            allocator.free(s);
+        }
+        self.allocatedStrings.deinit(allocator);
+
+        // Free all tracked heap-allocated ZSType pointers
+        for (self.allocatedTypes.items) |t| {
+            allocator.destroy(t);
+        }
+        self.allocatedTypes.deinit(allocator);
+
+        // Free all tracked argTypes slice arrays
+        for (self.allocatedSliceLists.items) |s| {
+            allocator.free(s);
+        }
+        self.allocatedSliceLists.deinit(allocator);
     }
 };
+
+fn computeMangledName(allocator: std.mem.Allocator, name: []const u8, argTypes: []const []const u8) ![]const u8 {
+    // Calculate total length
+    var len: usize = name.len + 2; // name + "__"
+    for (argTypes, 0..) |argType, i| {
+        if (i > 0) len += 1; // "_" separator
+        len += argType.len;
+    }
+
+    const buf = try allocator.alloc(u8, len);
+    var pos: usize = 0;
+    @memcpy(buf[pos..][0..name.len], name);
+    pos += name.len;
+    @memcpy(buf[pos..][0..2], "__");
+    pos += 2;
+    for (argTypes, 0..) |argType, i| {
+        if (i > 0) {
+            buf[pos] = '_';
+            pos += 1;
+        }
+        @memcpy(buf[pos..][0..argType.len], argType);
+        pos += argType.len;
+    }
+    return buf;
+}
+
+fn typeToString(zsType: Symbol.ZSType) []const u8 {
+    return switch (zsType) {
+        .number => "number",
+        .string => "string",
+        .function => "function",
+        .unknown => "unknown",
+    };
+}
 
 pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator) !AnalyzeResult {
     var errors = try std.ArrayList(AnalyzeError).initCapacity(allocator, 1);
@@ -35,16 +114,144 @@ pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator) !AnalyzeResul
         .errors = &errors,
         .allocator = allocator,
         .module = module,
+        .overloads = std.StringHashMap(std.ArrayList(OverloadEntry)).init(allocator),
+        .resolutions = std.StringHashMap([]const u8).init(allocator),
+        .overloadedNames = std.StringHashMap(void).init(allocator),
+        .allocatedStrings = try std.ArrayList([]const u8).initCapacity(allocator, 8),
+        .allocatedTypes = try std.ArrayList(*Symbol.ZSType).initCapacity(allocator, 4),
+        .allocatedSliceLists = try std.ArrayList([]const []const u8).initCapacity(allocator, 8),
     };
+
+    // Free overloads map and its inner ArrayLists (but NOT their contents —
+    // argTypes and mangledName are tracked in allocatedStrings)
+    defer {
+        var iter = analyzer.overloads.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.deinit(allocator);
+        }
+        analyzer.overloads.deinit();
+    }
+    // Note: resolutions, overloadedNames, allocatedStrings, allocatedTypes
+    // are moved into the result, not freed here
+
     var table = SymbolTable.init(allocator);
     try tableStack.enterScope(&table);
+
+    // Pre-pass: register all function overloads
+    try analyzer.registerFunctions(module);
+
+    // Determine which names are overloaded
+    var overloadIter = analyzer.overloads.iterator();
+    while (overloadIter.next()) |entry| {
+        if (entry.value_ptr.items.len > 1) {
+            try analyzer.overloadedNames.put(entry.key_ptr.*, {});
+        }
+    }
+
     try analyzer.analyzeModule(module);
     _ = try tableStack.exitScope();
 
     return .{
         .exports = table,
         .errors = try allocator.dupe(AnalyzeError, errors.items),
+        .resolutions = analyzer.resolutions,
+        .overloadedNames = analyzer.overloadedNames,
+        .allocatedStrings = analyzer.allocatedStrings,
+        .allocatedTypes = analyzer.allocatedTypes,
+        .allocatedSliceLists = analyzer.allocatedSliceLists,
     };
+}
+
+fn registerFunctions(self: *Self, module: zsm.ZSModule) !void {
+    for (module.ast) |node| {
+        switch (node) {
+            .stmt => {
+                switch (node.stmt) {
+                    .function => |func| {
+                        try self.registerFunction(func);
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+fn registerFunction(self: *Self, func: ast.stmt.ZSFn) !void {
+    const argTypes = try self.allocator.alloc([]const u8, func.args.len);
+    try self.allocatedSliceLists.append(self.allocator, argTypes);
+    for (func.args, 0..) |arg, i| {
+        argTypes[i] = if (arg.type) |t| t.reference else "unknown";
+    }
+
+    const external = func.modifiers.external != null;
+    const mangledName = if (external)
+        func.name
+    else blk: {
+        const name = try computeMangledName(self.allocator, func.name, argTypes);
+        try self.allocatedStrings.append(self.allocator, name);
+        break :blk name;
+    };
+
+    const retType = resolveTypeAnnotation(func.ret);
+
+    // Check for duplicate signatures
+    if (self.overloads.getPtr(func.name)) |entries| {
+        for (entries.items) |entry| {
+            if (entry.argTypes.len == argTypes.len) {
+                var allMatch = true;
+                for (entry.argTypes, argTypes) |a, b| {
+                    if (!std.mem.eql(u8, a, b)) {
+                        allMatch = false;
+                        break;
+                    }
+                }
+                if (allMatch) {
+                    const root = @import("ZenScript");
+                    const nameStart = @intFromPtr(func.name.ptr) - @intFromPtr(self.module.source.ptr);
+                    try self.errors.append(self.allocator, .{
+                        .message = "Duplicate function signature",
+                        .filename = self.module.filename,
+                        .start = nameStart,
+                        .end = nameStart + func.name.len,
+                        .codeLine = root.SourceHelpers.computeSourceLine(self.module.source, nameStart),
+                        .lineNumber = root.SourceHelpers.computeLineNumber(self.module.source, nameStart),
+                        .lineCol = root.SourceHelpers.computeLineOffset(self.module.source, nameStart),
+                    });
+                    return;
+                }
+            }
+        }
+        try entries.append(self.allocator, .{
+            .argTypes = argTypes,
+            .mangledName = mangledName,
+            .retType = retType,
+            .external = external,
+        });
+    } else {
+        var entries = try std.ArrayList(OverloadEntry).initCapacity(self.allocator, 2);
+        try entries.append(self.allocator, .{
+            .argTypes = argTypes,
+            .mangledName = mangledName,
+            .retType = retType,
+            .external = external,
+        });
+        try self.overloads.put(func.name, entries);
+    }
+}
+
+fn resolveTypeAnnotation(ret: ?ast.ZSType) Symbol.ZSType {
+    if (ret) |r| {
+        return switch (r) {
+            .reference => |ref| {
+                if (std.mem.eql(u8, ref, "number")) return .number;
+                if (std.mem.eql(u8, ref, "string")) return .string;
+                return .unknown;
+            },
+        };
+    }
+    return .unknown;
 }
 
 fn analyzeModule(self: *Self, module: zsm.ZSModule) !void {
@@ -91,8 +298,13 @@ fn analyzeVariable(self: *Self, variable: ast.stmt.ZSVar) !Symbol {
 }
 
 fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
-    const ret = try self.analyzeType(&function.ret);
+    const retType = resolveTypeAnnotation(function.ret);
     const args = try self.analyzeFnArgs(function.args);
+
+    // Heap-allocate the return type to avoid dangling pointer
+    const retPtr = try self.allocator.create(Symbol.ZSType);
+    retPtr.* = retType;
+    try self.allocatedTypes.append(self.allocator, retPtr);
 
     if (function.body) |body| {
         var scope = SymbolTable.init(self.allocator);
@@ -100,7 +312,7 @@ fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
         try self.tableStack.enterScope(&scope);
         // Add args as symbols in the function scope
         for (function.args) |arg| {
-            const argType = try self.analyzeType(&arg.type);
+            const argType = resolveTypeAnnotation(arg.type);
             try self.tableStack.put(.{
                 .name = arg.name,
                 .assignable = false,
@@ -116,7 +328,7 @@ fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
         .assignable = false,
         .signature = Symbol.ZSType{
             .function = .{
-                .ret = &ret,
+                .ret = retPtr,
                 .args = args,
             },
         },
@@ -125,12 +337,7 @@ fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
 
 fn analyzeType(self: *Self, ret: *const ?ast.ZSType) !Symbol.ZSType {
     _ = self;
-    if (ret.*) |r| {
-        return switch (r) {
-            .reference => .unknown,
-        };
-    }
-    return .unknown;
+    return resolveTypeAnnotation(ret.*);
 }
 
 fn analyzeBuiltin(self: *Self, builtin: ast.ZSBuiltin) !Symbol.ZSType {
@@ -148,6 +355,64 @@ fn analyzeFnArgs(self: *Self, args: []ast.stmt.ZSFn.Arg) ![]Symbol.sig.ZSFnArg {
 }
 
 fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
+    // Analyze all argument expressions and collect their types
+    // These are static string literals from typeToString, no need to track
+    const argTypes = try self.allocator.alloc([]const u8, call.arguments.len);
+    defer self.allocator.free(argTypes);
+    for (call.arguments, 0..) |arg, i| {
+        const argType = try self.analyzeExpr(arg);
+        argTypes[i] = typeToString(argType);
+    }
+
+    // Get the function name from the subject
+    const subject = call.subject.*;
+    const fnName: ?[]const u8 = switch (subject) {
+        .reference => subject.reference.name,
+        else => null,
+    };
+
+    if (fnName) |name| {
+        // Check if we have overloads for this function
+        if (self.overloads.get(name)) |entries| {
+            // Find matching overload
+            var matched: ?OverloadEntry = null;
+            for (entries.items) |entry| {
+                if (entry.argTypes.len == argTypes.len) {
+                    var allMatch = true;
+                    for (entry.argTypes, argTypes) |a, b| {
+                        if (!std.mem.eql(u8, a, b)) {
+                            allMatch = false;
+                            break;
+                        }
+                    }
+                    if (allMatch) {
+                        matched = entry;
+                        break;
+                    }
+                }
+            }
+
+            if (matched) |entry| {
+                // Determine the resolved name
+                const isOverloaded = self.overloadedNames.contains(name);
+                const resolvedName = if (isOverloaded and !entry.external)
+                    entry.mangledName
+                else
+                    name;
+
+                // Store resolution keyed by call startPos
+                const key = try std.fmt.allocPrint(self.allocator, "{}", .{call.startPos});
+                try self.resolutions.put(key, resolvedName);
+
+                return entry.retType;
+            } else {
+                try self.recordError(call, "No matching overload");
+                return Symbol.ZSType.unknown;
+            }
+        }
+    }
+
+    // Fallback: resolve via symbol table (for non-function-reference subjects)
     const subjectType = try self.analyzeExpr(call.subject.*);
     return switch (subjectType) {
         .function => subjectType.function.ret.*,

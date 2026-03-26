@@ -12,6 +12,25 @@ entry:
   store i32 %call_result1, ptr %callres2, align 4
   %arg3 = load i32, ptr %callres2, align 4
   call void @print_number(i32 %arg3)
+  %x = alloca i32, align 4
+  store i32 1, ptr %x, align 4
+  %x4 = alloca i32, align 4
+  store i32 2, ptr %x4, align 4
+  %arg5 = load i32, ptr %x, align 4
+  %arg6 = load i32, ptr %x4, align 4
+  %call_result7 = call i32 @add__number_number(i32 %arg5, i32 %arg6)
+  %callres8 = alloca i32, align 4
+  store i32 %call_result7, ptr %callres8, align 4
+  %arg9 = load i32, ptr %callres8, align 4
+  call void @print_number(i32 %arg9)
+  %x10 = alloca i32, align 4
+  store i32 5, ptr %x10, align 4
+  %arg11 = load i32, ptr %x10, align 4
+  %call_result12 = call i32 @add__number(i32 %arg11)
+  %callres13 = alloca i32, align 4
+  store i32 %call_result12, ptr %callres13, align 4
+  %arg14 = load i32, ptr %callres13, align 4
+  call void @print_number(i32 %arg14)
   ret void
 }
 
@@ -60,5 +79,23 @@ else:                                             ; preds = %entry
 
 merge:                                            ; preds = %else, %then
   %retval = load i32, ptr %ifres, align 4
+  ret i32 %retval
+}
+
+define i32 @add__number_number(i32 %0, i32 %1) {
+entry:
+  %a = alloca i32, align 4
+  store i32 %0, ptr %a, align 4
+  %b = alloca i32, align 4
+  store i32 %1, ptr %b, align 4
+  %retval = load i32, ptr %a, align 4
+  ret i32 %retval
+}
+
+define i32 @add__number(i32 %0) {
+entry:
+  %a = alloca i32, align 4
+  store i32 %0, ptr %a, align 4
+  %retval = load i32, ptr %a, align 4
   ret i32 %retval
 }

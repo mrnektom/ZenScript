@@ -10,8 +10,15 @@ instructions: *std.ArrayList(ir.ZSIR),
 allocator: std.mem.Allocator,
 nameCount: usize = 0,
 varNames: std.StringHashMap([]const u8),
+resolutions: *const std.StringHashMap([]const u8),
+overloadedNames: *const std.StringHashMap(void),
 
-pub fn generateIr(module: *const zsm.ZSModule, allocator: std.mem.Allocator) !ir.ZSIRInstructions {
+pub fn generateIr(
+    module: *const zsm.ZSModule,
+    allocator: std.mem.Allocator,
+    resolutions: *const std.StringHashMap([]const u8),
+    overloadedNames: *const std.StringHashMap(void),
+) !ir.ZSIRInstructions {
     var instructions = try std.ArrayList(ir.ZSIR).initCapacity(allocator, 5);
     defer instructions.deinit(allocator);
 
@@ -19,6 +26,8 @@ pub fn generateIr(module: *const zsm.ZSModule, allocator: std.mem.Allocator) !ir
         .instructions = &instructions,
         .allocator = allocator,
         .varNames = std.StringHashMap([]const u8).init(allocator),
+        .resolutions = resolutions,
+        .overloadedNames = overloadedNames,
     };
     defer irGen.varNames.deinit();
 
@@ -26,6 +35,30 @@ pub fn generateIr(module: *const zsm.ZSModule, allocator: std.mem.Allocator) !ir
         _ = try irGen.generateNode(node);
     }
     return .{ .instructions = try allocator.dupe(ir.ZSIR, instructions.items) };
+}
+
+fn computeMangledName(allocator: std.mem.Allocator, name: []const u8, argTypes: []const []const u8) ![]const u8 {
+    var len: usize = name.len + 2;
+    for (argTypes, 0..) |argType, i| {
+        if (i > 0) len += 1;
+        len += argType.len;
+    }
+
+    const buf = try allocator.alloc(u8, len);
+    var pos: usize = 0;
+    @memcpy(buf[pos..][0..name.len], name);
+    pos += name.len;
+    @memcpy(buf[pos..][0..2], "__");
+    pos += 2;
+    for (argTypes, 0..) |argType, i| {
+        if (i > 0) {
+            buf[pos] = '_';
+            pos += 1;
+        }
+        @memcpy(buf[pos..][0..argType.len], argType);
+        pos += argType.len;
+    }
+    return buf;
 }
 
 fn generateNode(self: *Self, node: ast.ZSAstNode) ![]const u8 {
@@ -56,11 +89,18 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
 }
 
 fn generateCall(self: *Self, call: ast.expr.ZSCall) Error![]const u8 {
-    const callerName = try self.generateExpr(call.subject.*);
+    var callerName = try self.generateExpr(call.subject.*);
     const argNames = try self.allocator.alloc([]const u8, call.arguments.len);
 
     for (call.arguments, 0..) |arg, index| {
         argNames[index] = try self.generateExpr(arg);
+    }
+
+    // Check if this call has a resolved overload name
+    const key = try std.fmt.allocPrint(self.allocator, "{}", .{call.startPos});
+    defer self.allocator.free(key);
+    if (self.resolutions.get(key)) |resolvedName| {
+        callerName = resolvedName;
     }
 
     const resultName = try self.generateName();
@@ -95,6 +135,13 @@ fn generateFunction(self: *Self, func: ast.stmt.ZSFn) ![]const u8 {
 
     const retType: []const u8 = if (func.ret) |r| r.reference else "void";
     const external = func.modifiers.external != null;
+
+    // Determine the function name: mangle if overloaded and not external
+    // Always allocate an owned copy so IR can free it uniformly
+    const fnName = if (!external and self.overloadedNames.contains(func.name))
+        try computeMangledName(self.allocator, func.name, argTypes)
+    else
+        try self.allocator.dupe(u8, func.name);
 
     if (func.body) |body| {
         // User-defined function with body
@@ -148,7 +195,7 @@ fn generateFunction(self: *Self, func: ast.stmt.ZSFn) ![]const u8 {
             self.allocator,
             ir.ZSIR{
                 .fn_def = ir.ZSIRFnDef{
-                    .name = func.name,
+                    .name = fnName,
                     .argTypes = argTypes,
                     .argNames = argNames,
                     .retType = retType,
@@ -162,7 +209,7 @@ fn generateFunction(self: *Self, func: ast.stmt.ZSFn) ![]const u8 {
             self.allocator,
             ir.ZSIR{
                 .fn_decl = ir.ZSIRFnDecl{
-                    .name = func.name,
+                    .name = fnName,
                     .argTypes = argTypes,
                     .retType = retType,
                     .external = external,
