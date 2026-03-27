@@ -1,5 +1,5 @@
 const std = @import("std");
-const ZSToken = @import("ZSToken.zig");
+const ZSToken = @import("zs_token.zig");
 const TokenType = ZSToken.TokenType;
 
 const Tokenizer = @This();

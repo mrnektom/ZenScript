@@ -3,7 +3,7 @@ const llvm = @import("llvm");
 const target = llvm.target;
 const types = llvm.types;
 const core = llvm.core;
-const ir = @import("../ir/ZSIR.zig");
+const ir = @import("../ir/zsir.zig");
 
 const LocalVar = struct {
     ptr: types.LLVMValueRef,

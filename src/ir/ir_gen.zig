@@ -1,5 +1,5 @@
 const std = @import("std");
-const ir = @import("ZSIR.zig");
+const ir = @import("zsir.zig");
 const zsm = @import("../ast/zs_module.zig");
 const ast = @import("../ast/ast_node.zig");
 const Self = @This();

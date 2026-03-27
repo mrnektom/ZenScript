@@ -4,7 +4,7 @@ const ast = @import("../ast/ast_node.zig");
 const sig = @import("symbol_signature.zig");
 const sts = @import("symbol_table_stack.zig");
 const Symbol = @import("symbol.zig");
-const AnalyzeError = @import("AnalazeError.zig");
+const AnalyzeError = @import("analyze_error.zig");
 const SymbolTable = sts.SymbolTable;
 const Self = @This();
 

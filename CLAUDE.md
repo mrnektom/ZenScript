@@ -24,30 +24,30 @@ Requires Zig >= 0.15.2. Dependencies (LLVM bindings, napi) are fetched automatic
 
 ## Compilation Pipeline
 
-The pipeline is orchestrated by `src/Pipline.zig` (note the typo — this is the actual filename) and flows through these stages:
+The pipeline is orchestrated by `src/pipeline.zig` and flows through these stages:
 
 ```
 .zs source → Tokenizer → Parser → Analyzer → IRGen → LLVMCodeGen
 ```
 
-1. **Tokenizer** (`src/tokens/Tokenizer.zig`) — Lexes source into `ZSToken`s (defined in `src/tokens/ZSToken.zig`). Skips whitespace, tracks positions/lines.
-2. **Parser** (`src/Parser.zig`) — Recursive descent parser producing an AST. Supports variable declarations (`let`/`const`), function declarations, external functions, expressions (numbers, strings, calls, references), and type annotations.
-3. **Analyzer** (`src/analyze/analyzer.zig`) — Walks the AST, builds a scoped symbol table, performs type inference, and detects undefined references and type errors. Error reporting includes source locations.
-4. **IR Generator** (`src/ir/IRGen.zig`) — Lowers AST to `ZSIR` instructions (assignments, calls) with generated temporaries (x0, x1, ...).
-5. **LLVM CodeGen** (`src/codegen/LLVMCodeGen.zig`) — Partially implemented. Currently commented out in the pipeline.
+1. **Tokenizer** (`src/tokens/tokenizer.zig`) — Lexes source into `ZSToken`s (defined in `src/tokens/zs_token.zig`). Skips whitespace, tracks positions/lines.
+2. **Parser** (`src/parser.zig`) — Recursive descent parser producing an AST. Supports variable declarations (`let`/`const`), function declarations, external functions, expressions (numbers, strings, calls, references), and type annotations.
+3. **Analyzer** (`src/analyzer/analyzer.zig`) — Walks the AST, builds a scoped symbol table, performs type inference, and detects undefined references and type errors. Error reporting includes source locations.
+4. **IR Generator** (`src/ir/ir_gen.zig`) — Lowers AST to `ZSIR` instructions (assignments, calls) with generated temporaries (x0, x1, ...).
+5. **LLVM CodeGen** (`src/codegen/llvm_codegen.zig`) — Partially implemented. Currently commented out in the pipeline.
 
 ## Key Architecture Details
 
 - **AST types** live in `src/ast/` — `ast_node.zig` is the top-level union (stmt/expr). Statements: `zs_stmt_var.zig` (variables), `zs_stmt_fn.zig` (functions). Expressions: `zs_expr.zig` (union of number/string/call/reference).
-- **Symbol table** is a stack of scopes (`src/analyze/symbol_table_stack.zig`) using `StringHashMap`. Symbols carry type signatures defined in `src/analyze/symbol_signature.zig` (number, string, unknown, function).
-- **Error reporting** uses `src/analyze/AnalazeError.zig` (note typo) with precise source locations computed by helpers in `src/helpers/SourceHelpers.zig`.
-- **CLI args** parsed in `src/args/Args.zig` — expects `-i <filepath>`.
+- **Symbol table** is a stack of scopes (`src/analyzer/symbol_table_stack.zig`) using `StringHashMap`. Symbols carry type signatures defined in `src/analyzer/symbol_signature.zig` (number, string, unknown, function).
+- **Error reporting** uses `src/analyzer/analyze_error.zig` with precise source locations computed by helpers in `src/helpers/source_helpers.zig`.
+- **CLI args** parsed in `src/args/args.zig` — expects `-i <filepath>`.
 - **Entry point**: `src/main.zig`. Node.js entry: `src/nodemodule.zig`.
 
 ## Naming Conventions
 
 - Public types use PascalCase prefixed with `ZS`: `ZSModule`, `ZSAstNode`, `ZSToken`, `ZSIR`
-- File names match the type they define (e.g., `ZSToken.zig` contains token type, `Tokenizer.zig` contains tokenizer)
+- File names use snake_case (e.g., `zs_token.zig` contains token type, `tokenizer.zig` contains tokenizer)
 - Each compilation phase is a self-contained module with clear interfaces between stages
 - Memory management follows Zig allocator patterns with explicit `deinit()` methods
 

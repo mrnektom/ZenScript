@@ -1,7 +1,7 @@
 //! By convention, root.zig is the root source file when making a library.
 const std = @import("std");
-pub const SourceHelpers = @import("helpers/SourceHelpers.zig");
-pub const MangleHelpers = @import("helpers/MangleHelpers.zig");
+pub const SourceHelpers = @import("helpers/source_helpers.zig");
+pub const MangleHelpers = @import("helpers/mangle_helpers.zig");
 
 pub fn bufferedPrint() !void {
     // Stdout is for the actual output of your application, for example if you

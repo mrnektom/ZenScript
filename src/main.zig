@@ -1,9 +1,9 @@
 const std = @import("std");
 const ZenScript = @import("ZenScript");
-const Args = @import("args/Args.zig");
-const Tokenizer = @import("tokens/Tokenizer.zig");
-const Pipline = @import("Pipline.zig");
-const llvm = @import("codegen/LLVMCodeGen.zig");
+const Args = @import("args/args.zig");
+const Tokenizer = @import("tokens/tokenizer.zig");
+const Pipline = @import("pipeline.zig");
+const llvm = @import("codegen/llvm_codegen.zig");
 
 pub fn main() !void {
     const args = try Args.collectArgs();
