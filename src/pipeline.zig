@@ -10,7 +10,6 @@ const llvm_lib = @import("llvm");
 const core = llvm_lib.core;
 const engine = llvm_lib.engine;
 const Args = @import("args/args.zig");
-const builtins = @import("runtime/builtins.zig");
 const zsm = @import("ast/zs_module.zig");
 
 const CompiledModule = struct {
@@ -243,7 +242,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
         // Only free the merged instructions array, not individual instructions (owned by deps/entry)
         defer allocator.free(mergedIr.instructions);
 
-        if (args.dumpIr or args.run) {
+        if (args.dumpIr or args.run or args.outputPath != null) {
             std.debug.print("Generating llvm\n", .{});
             const llvmModule = try llvm.generateLLVMModule(&mergedIr, allocator);
 
@@ -254,15 +253,34 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
                 const stdout = std.fs.File.stdout();
                 try stdout.writeAll(irSlice);
                 try stdout.writeAll("\n");
-
-                if (args.dumpIrOutput) |outputPath| {
-                    const outFile = try std.fs.cwd().createFile(outputPath, .{});
-                    defer outFile.close();
-                    try outFile.writeAll(irSlice);
-                }
             }
 
-            if (args.run) {
+            if (args.outputPath) |outputPath| {
+                // Compilation mode: emit object file and link
+                llvm.generateMain(llvmModule);
+
+                const tmpObjPath = "/tmp/zs_output.o";
+                try llvm.emitObjectFile(llvmModule, tmpObjPath);
+                core.LLVMDisposeModule(llvmModule);
+
+                // Link with cc
+                const ccResult = try std.process.Child.run(.{
+                    .allocator = allocator,
+                    .argv = &.{ "zig", "cc", "-o", outputPath, tmpObjPath, "-ldl" },
+                });
+                defer allocator.free(ccResult.stdout);
+                defer allocator.free(ccResult.stderr);
+
+                if (ccResult.term.Exited != 0) {
+                    std.debug.print("Linker error:\n{s}\n", .{ccResult.stderr});
+                    return;
+                }
+
+                // Clean up temp file
+                std.fs.cwd().deleteFile(tmpObjPath) catch {};
+
+                std.debug.print("Compiled to {s}\n", .{outputPath});
+            } else if (args.run) {
                 std.debug.print("Running\n", .{});
                 engine.LLVMLinkInMCJIT();
 
@@ -277,8 +295,6 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
                     core.LLVMDisposeModule(llvmModule);
                     return;
                 }
-
-                builtins.registerBuiltins(ee, llvmModule);
 
                 const initFn = core.LLVMGetNamedFunction(llvmModule, "init");
                 if (initFn == null) {

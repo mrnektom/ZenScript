@@ -2,7 +2,7 @@ const std = @import("std");
 
 const Error = error{MissingEntryPoint};
 
-pub const ExecutionArgs = struct { entryPoint: []const u8, dumpIr: bool = false, dumpIrOutput: ?[]const u8 = null, run: bool = false };
+pub const ExecutionArgs = struct { entryPoint: []const u8, dumpIr: bool = false, outputPath: ?[]const u8 = null, run: bool = false };
 
 pub fn collectArgs() Error!ExecutionArgs {
     var execArgs = ExecutionArgs{ .entryPoint = "" };
@@ -23,7 +23,7 @@ pub fn collectArgs() Error!ExecutionArgs {
         } else if (std.mem.eql(u8, arg, "-r")) {
             execArgs.run = true;
         } else if (std.mem.eql(u8, arg, "-o")) {
-            execArgs.dumpIrOutput = args.next();
+            execArgs.outputPath = args.next();
         }
     }
 

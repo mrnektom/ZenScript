@@ -115,6 +115,21 @@ pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator, deps: *const 
     defer table.deinit();
     try tableStack.enterScope(&table);
 
+    // Register built-in load_library(string): void
+    {
+        const argTypes = try allocator.alloc([]const u8, 1);
+        try analyzer.allocatedSliceLists.append(allocator, argTypes);
+        argTypes[0] = "string";
+        var entries = try std.ArrayList(OverloadEntry).initCapacity(allocator, 1);
+        try entries.append(allocator, .{
+            .argTypes = argTypes,
+            .mangledName = "load_library",
+            .retType = .unknown,
+            .external = true,
+        });
+        try analyzer.overloads.put("load_library", entries);
+    }
+
     // Pre-pass: register all function overloads
     try analyzer.registerFunctions(module);
 

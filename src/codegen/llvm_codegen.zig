@@ -1,6 +1,7 @@
 const std = @import("std");
 const llvm = @import("llvm");
 const target = llvm.target;
+const target_machine = llvm.target_machine;
 const types = llvm.types;
 const core = llvm.core;
 const ir = @import("../ir/zsir.zig");
@@ -49,6 +50,20 @@ pub fn generateLLVMModule(
     startupLLVM();
 
     const module: types.LLVMModuleRef = core.LLVMModuleCreateWithName("zs_module");
+
+    // Declare dlopen(i8*, i32) -> i8*
+    const ptrType = core.LLVMPointerType(core.LLVMInt8Type(), 0);
+    {
+        var dlopenParams: [2]types.LLVMTypeRef = .{ ptrType, core.LLVMInt32Type() };
+        const dlopenType = core.LLVMFunctionType(ptrType, &dlopenParams, 2, 0);
+        _ = core.LLVMAddFunction(module, "dlopen", dlopenType);
+    }
+    // Declare dlsym(i8*, i8*) -> i8*
+    {
+        var dlsymParams: [2]types.LLVMTypeRef = .{ ptrType, ptrType };
+        const dlsymType = core.LLVMFunctionType(ptrType, &dlsymParams, 2, 0);
+        _ = core.LLVMAddFunction(module, "dlsym", dlsymType);
+    }
 
     var params: [0]types.LLVMTypeRef = [_]types.LLVMTypeRef{};
 
@@ -102,7 +117,82 @@ fn generateFnDecl(module: types.LLVMModuleRef, decl: ir.ZSIRFnDecl, allocator: s
     const funcType = core.LLVMFunctionType(retType, &paramTypes, paramCount, 0);
     const nameZ = try allocator.dupeZ(u8, decl.name);
     defer allocator.free(nameZ);
-    _ = core.LLVMAddFunction(module, nameZ.ptr, funcType);
+
+    if (!decl.external) {
+        // Non-external declaration: just add function declaration
+        _ = core.LLVMAddFunction(module, nameZ.ptr, funcType);
+        return;
+    }
+
+    // External function: generate a wrapper with lazy dlsym resolution
+    const ptrType = core.LLVMPointerType(core.LLVMInt8Type(), 0);
+
+    // 1. Global variable for cached function pointer: @<name>_ptr = global ptr null
+    const ptrVarNameSlice = try std.fmt.allocPrint(allocator, "{s}_ptr", .{decl.name});
+    defer allocator.free(ptrVarNameSlice);
+    const ptrVarName = try allocator.dupeZ(u8, ptrVarNameSlice);
+    defer allocator.free(ptrVarName);
+    const globalPtr = core.LLVMAddGlobal(module, ptrType, ptrVarName.ptr);
+    core.LLVMSetInitializer(globalPtr, core.LLVMConstNull(ptrType));
+
+    // 2. Global string constant with the function name: @.str.<name> = private constant [N x i8] c"<name>\00"
+    const strConstNameSlice = try std.fmt.allocPrint(allocator, ".str.{s}", .{decl.name});
+    defer allocator.free(strConstNameSlice);
+    const strConstName = try allocator.dupeZ(u8, strConstNameSlice);
+    defer allocator.free(strConstName);
+    const nameLen: c_uint = @intCast(decl.name.len);
+    const nameConst = core.LLVMConstString(nameZ.ptr, nameLen, 0); // 0 = add null terminator
+    const strGlobal = core.LLVMAddGlobal(module, core.LLVMTypeOf(nameConst), strConstName.ptr);
+    core.LLVMSetInitializer(strGlobal, nameConst);
+    core.LLVMSetGlobalConstant(strGlobal, 1);
+    core.LLVMSetLinkage(strGlobal, .LLVMPrivateLinkage);
+
+    // 3. Generate wrapper function
+    const wrapperFunc = core.LLVMAddFunction(module, nameZ.ptr, funcType);
+    const entryBlock = core.LLVMAppendBasicBlock(wrapperFunc, "entry");
+    const resolveBlock = core.LLVMAppendBasicBlock(wrapperFunc, "resolve");
+    const callBlock = core.LLVMAppendBasicBlock(wrapperFunc, "call");
+
+    const builder = core.LLVMCreateBuilder();
+    defer core.LLVMDisposeBuilder(builder);
+
+    // entry: load cached pointer, check if null, branch
+    core.LLVMPositionBuilderAtEnd(builder, entryBlock);
+    const cachedPtr = core.LLVMBuildLoad2(builder, ptrType, globalPtr, "ptr");
+    const isNull = core.LLVMBuildICmp(builder, .LLVMIntEQ, cachedPtr, core.LLVMConstNull(ptrType), "is_null");
+    _ = core.LLVMBuildCondBr(builder, isNull, resolveBlock, callBlock);
+
+    // resolve: call dlsym(NULL, "<name>"), store result, branch to call
+    core.LLVMPositionBuilderAtEnd(builder, resolveBlock);
+    const dlsymFunc = core.LLVMGetNamedFunction(module, "dlsym");
+    var dlsymArgs: [2]types.LLVMValueRef = .{
+        core.LLVMConstNull(ptrType), // RTLD_DEFAULT = NULL
+        strGlobal,
+    };
+    const dlsymFuncType = core.LLVMGlobalGetValueType(dlsymFunc);
+    const sym = core.LLVMBuildCall2(builder, dlsymFuncType, dlsymFunc, &dlsymArgs, 2, "sym");
+    _ = core.LLVMBuildStore(builder, sym, globalPtr);
+    _ = core.LLVMBuildBr(builder, callBlock);
+
+    // call: load function pointer, call it with forwarded args, return result
+    core.LLVMPositionBuilderAtEnd(builder, callBlock);
+    const fptr = core.LLVMBuildLoad2(builder, ptrType, globalPtr, "fptr");
+
+    var callArgs: [16]types.LLVMValueRef = undefined;
+    var i: c_uint = 0;
+    while (i < paramCount) : (i += 1) {
+        callArgs[i] = core.LLVMGetParam(wrapperFunc, i);
+    }
+
+    const isVoid = core.LLVMGetTypeKind(retType) == .LLVMVoidTypeKind;
+    const resultName: [*:0]const u8 = if (isVoid) "" else "result";
+    const callResult = core.LLVMBuildCall2(builder, funcType, fptr, &callArgs, paramCount, resultName);
+
+    if (isVoid) {
+        _ = core.LLVMBuildRetVoid(builder);
+    } else {
+        _ = core.LLVMBuildRet(builder, callResult);
+    }
 }
 
 fn generateFnDef(
@@ -353,6 +443,62 @@ fn generateCall(
     call: ir.ZSIRCall,
     allocator: std.mem.Allocator,
 ) !void {
+    // Special handling for load_library: call dlopen
+    if (std.mem.eql(u8, call.fnName, "load_library")) {
+        if (call.argNames.len > 0) {
+            if (locals.get(call.argNames[0])) |local| {
+                // local is a ZSString struct {i32, i8*}; extract len and ptr fields
+                const strStruct = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "str");
+                const strLen = core.LLVMBuildExtractValue(builder, strStruct, 0, "strlen");
+                const strPtr = core.LLVMBuildExtractValue(builder, strStruct, 1, "strptr");
+
+                // dlopen needs a null-terminated string; allocate len+1 bytes, copy, add \0
+                const i8Type = core.LLVMInt8Type();
+                const one = core.LLVMConstInt(core.LLVMInt32Type(), 1, 0);
+                const bufLen = core.LLVMBuildAdd(builder, strLen, one, "buflen");
+                const buf = core.LLVMBuildArrayAlloca(builder, i8Type, bufLen, "cstr");
+
+                // memcpy the string data
+                const memcpyFn = blk: {
+                    var existing = core.LLVMGetNamedFunction(module, "llvm.memcpy.p0.p0.i32");
+                    if (existing == null) {
+                        var memcpyParams: [4]types.LLVMTypeRef = .{
+                            core.LLVMPointerType(i8Type, 0),
+                            core.LLVMPointerType(i8Type, 0),
+                            core.LLVMInt32Type(),
+                            core.LLVMInt1Type(),
+                        };
+                        const memcpyType = core.LLVMFunctionType(core.LLVMVoidType(), &memcpyParams, 4, 0);
+                        existing = core.LLVMAddFunction(module, "llvm.memcpy.p0.p0.i32", memcpyType);
+                    }
+                    break :blk existing;
+                };
+                const memcpyFnType = core.LLVMGlobalGetValueType(memcpyFn);
+                var memcpyArgs: [4]types.LLVMValueRef = .{
+                    buf,
+                    strPtr,
+                    strLen,
+                    core.LLVMConstInt(core.LLVMInt1Type(), 0, 0), // isvolatile = false
+                };
+                _ = core.LLVMBuildCall2(builder, memcpyFnType, memcpyFn, &memcpyArgs, 4, "");
+
+                // Write null terminator at buf[len]
+                const nullPos = core.LLVMBuildGEP2(builder, i8Type, buf, @constCast(&[_]types.LLVMValueRef{strLen}), 1, "nullpos");
+                _ = core.LLVMBuildStore(builder, core.LLVMConstInt(i8Type, 0, 0), nullPos);
+
+                const dlopenFunc = core.LLVMGetNamedFunction(module, "dlopen");
+                const dlopenFuncType = core.LLVMGlobalGetValueType(dlopenFunc);
+                // 258 = RTLD_NOW (2) | RTLD_GLOBAL (256) on Linux
+                var dlopenArgs: [2]types.LLVMValueRef = .{
+                    buf,
+                    core.LLVMConstInt(core.LLVMInt32Type(), 258, 0),
+                };
+                _ = core.LLVMBuildCall2(builder, dlopenFuncType, dlopenFunc, &dlopenArgs, 2, "");
+            }
+        }
+        return;
+    }
+
     const fnNameZ = try allocator.dupeZ(u8, call.fnName);
     defer allocator.free(fnNameZ);
     const funcRef = core.LLVMGetNamedFunction(module, fnNameZ.ptr);
@@ -424,6 +570,72 @@ fn getStringValue(builder: types.LLVMBuilderRef, value: [*:0]const u8) !types.LL
 
 fn convertToCString(allocator: std.mem.Allocator, str: *const []const u8) ![*:0]const u8 {
     return try allocator.dupeZ(u8, str.*);
+}
+
+/// Generate a main(i32, i8**) -> i32 function that calls init() and returns 0.
+pub fn generateMain(module: types.LLVMModuleRef) void {
+    const ptrType = core.LLVMPointerType(core.LLVMInt8Type(), 0);
+    const ptrPtrType = core.LLVMPointerType(ptrType, 0);
+    var mainParams: [2]types.LLVMTypeRef = .{ core.LLVMInt32Type(), ptrPtrType };
+    const mainFuncType = core.LLVMFunctionType(core.LLVMInt32Type(), &mainParams, 2, 0);
+    const mainFunc = core.LLVMAddFunction(module, "main", mainFuncType);
+
+    const entry = core.LLVMAppendBasicBlock(mainFunc, "entry");
+    const builder = core.LLVMCreateBuilder();
+    defer core.LLVMDisposeBuilder(builder);
+    core.LLVMPositionBuilderAtEnd(builder, entry);
+
+    // Call init()
+    const initFunc = core.LLVMGetNamedFunction(module, "init");
+    if (initFunc != null) {
+        const initFuncType = core.LLVMGlobalGetValueType(initFunc);
+        var noArgs: [0]types.LLVMValueRef = .{};
+        _ = core.LLVMBuildCall2(builder, initFuncType, initFunc, &noArgs, 0, "");
+    }
+
+    // return 0
+    _ = core.LLVMBuildRet(builder, core.LLVMConstInt(core.LLVMInt32Type(), 0, 0));
+}
+
+/// Emit an object file from the LLVM module.
+pub fn emitObjectFile(module: types.LLVMModuleRef, path: [*:0]const u8) !void {
+    const triple = target_machine.LLVMGetDefaultTargetTriple();
+    defer core.LLVMDisposeMessage(triple);
+
+    var tgt: types.LLVMTargetRef = null;
+    var err: [*c]u8 = null;
+    if (target_machine.LLVMGetTargetFromTriple(triple, &tgt, &err) != 0) {
+        if (err) |errMsg| {
+            std.debug.print("Failed to get target: {s}\n", .{errMsg});
+            core.LLVMDisposeMessage(errMsg);
+        }
+        return error.LLVMTargetError;
+    }
+
+    core.LLVMSetTarget(module, triple);
+
+    const machine = target_machine.LLVMCreateTargetMachine(
+        tgt,
+        triple,
+        "generic",
+        "",
+        .LLVMCodeGenLevelDefault,
+        .LLVMRelocPIC,
+        .LLVMCodeModelDefault,
+    );
+    defer target_machine.LLVMDisposeTargetMachine(machine);
+
+    const layout = target_machine.LLVMCreateTargetDataLayout(machine);
+    target.LLVMSetModuleDataLayout(module, layout);
+
+    var emitErr: [*c]u8 = null;
+    if (target_machine.LLVMTargetMachineEmitToFile(machine, module, path, .LLVMObjectFile, &emitErr) != 0) {
+        if (emitErr) |errMsg| {
+            std.debug.print("Failed to emit object file: {s}\n", .{errMsg});
+            core.LLVMDisposeMessage(errMsg);
+        }
+        return error.LLVMEmitError;
+    }
 }
 
 fn startupLLVM() void {
