@@ -137,6 +137,39 @@ fn mergeIr(
     return .{ .instructions = try allocator.dupe(ir.ZSIR, merged.items) };
 }
 
+/// Find the prelude.zs path relative to the compiler executable.
+fn findPreludePath(allocator: std.mem.Allocator) !?[]const u8 {
+    // Try relative to executable
+    var buf: [4096]u8 = undefined;
+    if (std.fs.selfExePath(&buf)) |ep| {
+        const exeDir = std.fs.path.dirname(ep) orelse ".";
+        const candidate = try std.fs.path.join(allocator, &.{ exeDir, "stdlib", "prelude.zs" });
+        if (std.fs.cwd().access(candidate, .{})) |_| {
+            return candidate;
+        } else |_| {
+            allocator.free(candidate);
+        }
+        // Try one level up (zig-out/bin/../stdlib)
+        const parentDir = std.fs.path.dirname(exeDir) orelse ".";
+        const candidate2 = try std.fs.path.join(allocator, &.{ parentDir, "stdlib", "prelude.zs" });
+        if (std.fs.cwd().access(candidate2, .{})) |_| {
+            return candidate2;
+        } else |_| {
+            allocator.free(candidate2);
+        }
+    } else |_| {}
+
+    // Try CWD
+    const cwdCandidate = try allocator.dupe(u8, "stdlib/prelude.zs");
+    if (std.fs.cwd().access(cwdCandidate, .{})) |_| {
+        return cwdCandidate;
+    } else |_| {
+        allocator.free(cwdCandidate);
+    }
+
+    return null;
+}
+
 pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
     _ = self;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -218,9 +251,29 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
         }
     }
 
+    // Auto-import stdlib prelude
+    var preludeExports: ?*const @import("analyzer/symbol_table_stack.zig").SymbolTable = null;
+    if (try findPreludePath(allocator)) |pPath| {
+        defer allocator.free(pPath);
+        if (compileModule(allocator, pPath, &cache, &inProgress, &allSources, &allModules)) |preludeCompiled| {
+            try depCompiled.append(allocator, preludeCompiled);
+            preludeExports = &preludeCompiled.analyzeResult.exports;
+
+            // Map all exported symbols from prelude to IR names
+            var exportIter = preludeCompiled.analyzeResult.exports.iterator();
+            while (exportIter.next()) |entry| {
+                if (preludeCompiled.irResult.varNames.get(entry.key_ptr.*)) |irName| {
+                    try importedVarNames.put(entry.key_ptr.*, irName);
+                }
+            }
+        } else |err| {
+            std.debug.print("Warning: could not compile prelude: {}\n", .{err});
+        }
+    }
+
     std.debug.print("Analyzing\n", .{});
 
-    var analyzeResult = try Analyzer.analyze(module, allocator, &depAnalyzeResults);
+    var analyzeResult = try Analyzer.analyzeWithPrelude(module, allocator, &depAnalyzeResults, preludeExports);
     defer analyzeResult.deinit(allocator);
 
     for (analyzeResult.errors) |e| {

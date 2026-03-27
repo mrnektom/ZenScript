@@ -96,12 +96,15 @@ fn generateInstruction(
 ) std.mem.Allocator.Error!void {
     switch (instruction.*) {
         .assign => try generateAssign(builder, locals, instruction.assign),
+        .store => generateStore(builder, locals, instruction.store),
         .call => try generateCall(builder, module, locals, instruction.call, allocator),
         .fn_decl => try generateFnDecl(module, instruction.fn_decl, allocator),
         .fn_def => try generateFnDef(builder, module, instruction.fn_def, allocator),
         .ret => generateRet(builder, locals, instruction.ret),
         .branch => try generateBranch(builder, module, locals, instruction.branch, allocator),
         .compare => try generateCompare(builder, locals, instruction.compare, allocator),
+        .arith => try generateArith(builder, locals, instruction.arith, allocator),
+        .loop => try generateLoop(builder, module, locals, instruction.loop, allocator),
         .module_init => try generateModuleInit(builder, module, instruction.module_init, allocator),
     }
 }
@@ -378,8 +381,16 @@ fn generateCompare(
 
     const pred: types.LLVMIntPredicate = if (std.mem.eql(u8, cmp.op, "=="))
         .LLVMIntEQ
+    else if (std.mem.eql(u8, cmp.op, "!="))
+        .LLVMIntNE
+    else if (std.mem.eql(u8, cmp.op, ">"))
+        .LLVMIntSGT
+    else if (std.mem.eql(u8, cmp.op, "<"))
+        .LLVMIntSLT
+    else if (std.mem.eql(u8, cmp.op, ">="))
+        .LLVMIntSGE
     else
-        .LLVMIntNE;
+        .LLVMIntSLE;
 
     const cmpResult = core.LLVMBuildICmp(builder, pred, lhsVal, rhsVal, "cmp");
 
@@ -389,6 +400,101 @@ fn generateCompare(
     try locals.put(cmp.resultName, LocalVar{ .ptr = ptr, .ty = core.LLVMInt1Type() });
 
     _ = allocator;
+}
+
+fn generateArith(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    arithInst: ir.ZSIRArith,
+    allocator: std.mem.Allocator,
+) !void {
+    _ = allocator;
+
+    var lhsVal: types.LLVMValueRef = undefined;
+    if (locals.get(arithInst.lhs)) |local| {
+        lhsVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "lhs");
+    } else {
+        return;
+    }
+
+    var rhsVal: types.LLVMValueRef = undefined;
+    if (locals.get(arithInst.rhs)) |local| {
+        rhsVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "rhs");
+    } else {
+        return;
+    }
+
+    const result = if (std.mem.eql(u8, arithInst.op, "+"))
+        core.LLVMBuildAdd(builder, lhsVal, rhsVal, "add")
+    else if (std.mem.eql(u8, arithInst.op, "-"))
+        core.LLVMBuildSub(builder, lhsVal, rhsVal, "sub")
+    else if (std.mem.eql(u8, arithInst.op, "*"))
+        core.LLVMBuildMul(builder, lhsVal, rhsVal, "mul")
+    else if (std.mem.eql(u8, arithInst.op, "/"))
+        core.LLVMBuildSDiv(builder, lhsVal, rhsVal, "div")
+    else
+        core.LLVMBuildSRem(builder, lhsVal, rhsVal, "rem");
+
+    const ptr = core.LLVMBuildAlloca(builder, core.LLVMInt32Type(), "arithres");
+    _ = core.LLVMBuildStore(builder, result, ptr);
+    try locals.put(arithInst.resultName, LocalVar{ .ptr = ptr, .ty = core.LLVMInt32Type() });
+}
+
+fn generateLoop(
+    builder: types.LLVMBuilderRef,
+    module: types.LLVMModuleRef,
+    locals: *std.StringHashMap(LocalVar),
+    loop: ir.ZSIRLoop,
+    allocator: std.mem.Allocator,
+) !void {
+    const currentFunc = core.LLVMGetBasicBlockParent(core.LLVMGetInsertBlock(builder));
+    const condBlock = core.LLVMAppendBasicBlock(currentFunc, "while.cond");
+    const bodyBlock = core.LLVMAppendBasicBlock(currentFunc, "while.body");
+    const afterBlock = core.LLVMAppendBasicBlock(currentFunc, "while.after");
+
+    // Branch to condition block
+    _ = core.LLVMBuildBr(builder, condBlock);
+
+    // Condition block: evaluate condition
+    core.LLVMPositionBuilderAtEnd(builder, condBlock);
+    for (loop.condition) |inst| {
+        try generateInstruction(builder, module, locals, &inst, allocator);
+    }
+
+    // Load condition and compare != 0
+    var condVal: types.LLVMValueRef = undefined;
+    if (locals.get(loop.conditionName)) |local| {
+        condVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "whilecond");
+    } else {
+        _ = core.LLVMBuildBr(builder, afterBlock);
+        core.LLVMPositionBuilderAtEnd(builder, bodyBlock);
+        _ = core.LLVMBuildBr(builder, condBlock);
+        core.LLVMPositionBuilderAtEnd(builder, afterBlock);
+        return;
+    }
+
+    const condBool = core.LLVMBuildICmp(
+        builder,
+        .LLVMIntNE,
+        condVal,
+        core.LLVMConstInt(core.LLVMTypeOf(condVal), 0, 0),
+        "whilebool",
+    );
+    _ = core.LLVMBuildCondBr(builder, condBool, bodyBlock, afterBlock);
+
+    // Body block
+    core.LLVMPositionBuilderAtEnd(builder, bodyBlock);
+    for (loop.body) |inst| {
+        try generateInstruction(builder, module, locals, &inst, allocator);
+    }
+    // Check if body has a terminator (e.g., return), if not jump back to condition
+    const bodyTerm = core.LLVMGetBasicBlockTerminator(core.LLVMGetInsertBlock(builder));
+    if (bodyTerm == null) {
+        _ = core.LLVMBuildBr(builder, condBlock);
+    }
+
+    // Continue after loop
+    core.LLVMPositionBuilderAtEnd(builder, afterBlock);
 }
 
 fn generateModuleInit(
@@ -434,6 +540,17 @@ fn generateAssign(builder: types.LLVMBuilderRef, locals: *std.StringHashMap(Loca
     _ = core.LLVMBuildStore(builder, value, ptr);
 
     try locals.put(assign.varName, LocalVar{ .ptr = ptr, .ty = ty });
+}
+
+fn generateStore(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    storeInst: ir.ZSIRStore,
+) void {
+    const targetLocal = locals.get(storeInst.target) orelse return;
+    const valueLocal = locals.get(storeInst.value) orelse return;
+    const val = core.LLVMBuildLoad2(builder, valueLocal.ty, valueLocal.ptr, "storeval");
+    _ = core.LLVMBuildStore(builder, val, targetLocal.ptr);
 }
 
 fn generateCall(
@@ -499,6 +616,28 @@ fn generateCall(
         return;
     }
 
+    // Handle intrinsics
+    if (std.mem.eql(u8, call.fnName, "__syscall3")) {
+        try generateSyscall3(builder, locals, call);
+        return;
+    }
+    if (std.mem.eql(u8, call.fnName, "__ptr_to_int")) {
+        try generatePtrToInt(builder, locals, call);
+        return;
+    }
+    if (std.mem.eql(u8, call.fnName, "__str_len")) {
+        try generateStrLen(builder, locals, call);
+        return;
+    }
+    if (std.mem.eql(u8, call.fnName, "__print_number")) {
+        try generatePrintNumber(builder, module, locals, call, allocator);
+        return;
+    }
+    if (std.mem.eql(u8, call.fnName, "__read_line")) {
+        try generateReadLine(builder, module, locals, call, allocator);
+        return;
+    }
+
     const fnNameZ = try allocator.dupeZ(u8, call.fnName);
     defer allocator.free(fnNameZ);
     const funcRef = core.LLVMGetNamedFunction(module, fnNameZ.ptr);
@@ -527,6 +666,329 @@ fn generateCall(
         _ = core.LLVMBuildStore(builder, result, ptr);
         try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = retType });
     }
+}
+
+// --- Intrinsics ---
+
+fn generateSyscall3(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    call: ir.ZSIRCall,
+) !void {
+    if (call.argNames.len != 4) return;
+
+    const i64Type = core.LLVMInt64Type();
+    const i32Type = core.LLVMInt32Type();
+
+    // Load all 4 args (nr, a1, a2, a3) and extend to i64
+    var args64: [4]types.LLVMValueRef = undefined;
+    for (call.argNames, 0..) |argName, i| {
+        if (locals.get(argName)) |local| {
+            const val = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "sarg");
+            // If already i64 (e.g. from __ptr_to_int), use directly; otherwise sext
+            if (core.LLVMGetTypeKind(local.ty) == .LLVMIntegerTypeKind and
+                core.LLVMGetIntTypeWidth(local.ty) == 64)
+            {
+                args64[i] = val;
+            } else {
+                args64[i] = core.LLVMBuildSExt(builder, val, i64Type, "sext");
+            }
+        } else {
+            return;
+        }
+    }
+
+    // Build inline asm for syscall
+    // Inputs: rax=nr, rdi=a1, rsi=a2, rdx=a3
+    // Output: rax
+    var paramTypes: [4]types.LLVMTypeRef = .{ i64Type, i64Type, i64Type, i64Type };
+    const asmFnType = core.LLVMFunctionType(i64Type, &paramTypes, 4, 0);
+    const inlineAsm = core.LLVMGetInlineAsm(
+        asmFnType,
+        @constCast("syscall"),
+        7,
+        @constCast("={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}"),
+        56,
+        1, // hasSideEffects
+        0, // isAlignStack
+        .LVMInlineAsmDialectATT,
+        0, // canThrow
+    );
+
+    const result64 = core.LLVMBuildCall2(builder, asmFnType, inlineAsm, &args64, 4, "syscall");
+
+    // Truncate result to i32
+    const result32 = core.LLVMBuildTrunc(builder, result64, i32Type, "systrunc");
+    const ptr = core.LLVMBuildAlloca(builder, i32Type, "sysres");
+    _ = core.LLVMBuildStore(builder, result32, ptr);
+    try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = i32Type });
+}
+
+fn generatePtrToInt(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    call: ir.ZSIRCall,
+) !void {
+    if (call.argNames.len != 1) return;
+
+    if (locals.get(call.argNames[0])) |local| {
+        const strStruct = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "str");
+        // ZSString = { i32 len, i8* ptr }, extract ptr at index 1
+        const strPtr = core.LLVMBuildExtractValue(builder, strStruct, 1, "strptr");
+        // Use i64 to preserve full 64-bit pointer on x86_64
+        const i64Type = core.LLVMInt64Type();
+        const ptrInt = core.LLVMBuildPtrToInt(builder, strPtr, i64Type, "ptrint");
+
+        const ptr = core.LLVMBuildAlloca(builder, i64Type, "ptrintres");
+        _ = core.LLVMBuildStore(builder, ptrInt, ptr);
+        try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = i64Type });
+    }
+}
+
+fn generateStrLen(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    call: ir.ZSIRCall,
+) !void {
+    if (call.argNames.len != 1) return;
+
+    if (locals.get(call.argNames[0])) |local| {
+        const strStruct = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "str");
+        // ZSString = { i32 len, i8* ptr }, extract len at index 0
+        const strLen = core.LLVMBuildExtractValue(builder, strStruct, 0, "strlen");
+
+        const ptr = core.LLVMBuildAlloca(builder, core.LLVMInt32Type(), "strlenres");
+        _ = core.LLVMBuildStore(builder, strLen, ptr);
+        try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = core.LLVMInt32Type() });
+    }
+}
+
+fn generatePrintNumber(
+    builder: types.LLVMBuilderRef,
+    module: types.LLVMModuleRef,
+    locals: *std.StringHashMap(LocalVar),
+    call: ir.ZSIRCall,
+    allocator: std.mem.Allocator,
+) !void {
+    _ = allocator;
+    _ = module;
+    if (call.argNames.len != 1) return;
+
+    var numVal: types.LLVMValueRef = undefined;
+    if (locals.get(call.argNames[0])) |local| {
+        numVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "num");
+    } else {
+        return;
+    }
+
+    const i32Type = core.LLVMInt32Type();
+    const i64Type = core.LLVMInt64Type();
+    const i8Type = core.LLVMInt8Type();
+
+    // Allocate a 20-byte buffer on the stack for itoa
+    const bufSize = core.LLVMConstInt(i32Type, 20, 0);
+    const buf = core.LLVMBuildArrayAlloca(builder, i8Type, bufSize, "numbuf");
+
+    const currentFunc = core.LLVMGetBasicBlockParent(core.LLVMGetInsertBlock(builder));
+
+    // Allocate mutable variables on stack
+    const posPtr = core.LLVMBuildAlloca(builder, i32Type, "pos");
+    _ = core.LLVMBuildStore(builder, core.LLVMConstInt(i32Type, 20, 0), posPtr);
+    const valPtr = core.LLVMBuildAlloca(builder, i32Type, "val");
+    const isNegPtr = core.LLVMBuildAlloca(builder, core.LLVMInt1Type(), "isneg");
+
+    // Check if negative
+    const isNeg = core.LLVMBuildICmp(builder, .LLVMIntSLT, numVal, core.LLVMConstInt(i32Type, 0, 0), "isneg");
+    _ = core.LLVMBuildStore(builder, isNeg, isNegPtr);
+
+    // abs_n = is_neg ? 0 - n : n
+    const negVal = core.LLVMBuildNeg(builder, numVal, "neg");
+    const absVal = core.LLVMBuildSelect(builder, isNeg, negVal, numVal, "abs");
+    _ = core.LLVMBuildStore(builder, absVal, valPtr);
+
+    // Create all basic blocks upfront
+    const loopCond = core.LLVMAppendBasicBlock(currentFunc, "itoa.cond");
+    const loopBody = core.LLVMAppendBasicBlock(currentFunc, "itoa.body");
+    const zeroCheck = core.LLVMAppendBasicBlock(currentFunc, "itoa.zero");
+    const zeroBody = core.LLVMAppendBasicBlock(currentFunc, "itoa.writezero");
+    const negCheck = core.LLVMAppendBasicBlock(currentFunc, "itoa.neg");
+    const negBody = core.LLVMAppendBasicBlock(currentFunc, "itoa.writeneg");
+    const writeBlock = core.LLVMAppendBasicBlock(currentFunc, "itoa.write");
+
+    _ = core.LLVMBuildBr(builder, loopCond);
+
+    // --- loopCond ---
+    core.LLVMPositionBuilderAtEnd(builder, loopCond);
+    const curVal = core.LLVMBuildLoad2(builder, i32Type, valPtr, "curval");
+    const gtZero = core.LLVMBuildICmp(builder, .LLVMIntSGT, curVal, core.LLVMConstInt(i32Type, 0, 0), "gtzero");
+    _ = core.LLVMBuildCondBr(builder, gtZero, loopBody, zeroCheck);
+
+    // --- loopBody ---
+    core.LLVMPositionBuilderAtEnd(builder, loopBody);
+    const val2 = core.LLVMBuildLoad2(builder, i32Type, valPtr, "val2");
+    const digit = core.LLVMBuildSRem(builder, val2, core.LLVMConstInt(i32Type, 10, 0), "digit");
+    const pos2 = core.LLVMBuildLoad2(builder, i32Type, posPtr, "pos2");
+    const newPos = core.LLVMBuildSub(builder, pos2, core.LLVMConstInt(i32Type, 1, 0), "newpos");
+    _ = core.LLVMBuildStore(builder, newPos, posPtr);
+    const charVal = core.LLVMBuildAdd(builder, digit, core.LLVMConstInt(i32Type, 48, 0), "charval");
+    const charByte = core.LLVMBuildTrunc(builder, charVal, i8Type, "charbyte");
+    const bufIdx = core.LLVMBuildGEP2(builder, i8Type, buf, @constCast(&[_]types.LLVMValueRef{newPos}), 1, "bufidx");
+    _ = core.LLVMBuildStore(builder, charByte, bufIdx);
+    const newVal = core.LLVMBuildSDiv(builder, val2, core.LLVMConstInt(i32Type, 10, 0), "newval");
+    _ = core.LLVMBuildStore(builder, newVal, valPtr);
+    _ = core.LLVMBuildBr(builder, loopCond);
+
+    // --- zeroCheck ---
+    core.LLVMPositionBuilderAtEnd(builder, zeroCheck);
+    const wasZero = core.LLVMBuildICmp(builder, .LLVMIntEQ, absVal, core.LLVMConstInt(i32Type, 0, 0), "waszero");
+    _ = core.LLVMBuildCondBr(builder, wasZero, zeroBody, negCheck);
+
+    // --- zeroBody ---
+    core.LLVMPositionBuilderAtEnd(builder, zeroBody);
+    const posZ = core.LLVMBuildLoad2(builder, i32Type, posPtr, "posz");
+    const newPosZ = core.LLVMBuildSub(builder, posZ, core.LLVMConstInt(i32Type, 1, 0), "newposz");
+    _ = core.LLVMBuildStore(builder, newPosZ, posPtr);
+    const bufIdxZ = core.LLVMBuildGEP2(builder, i8Type, buf, @constCast(&[_]types.LLVMValueRef{newPosZ}), 1, "bufidxz");
+    _ = core.LLVMBuildStore(builder, core.LLVMConstInt(i8Type, 48, 0), bufIdxZ);
+    _ = core.LLVMBuildBr(builder, negCheck);
+
+    // --- negCheck ---
+    core.LLVMPositionBuilderAtEnd(builder, negCheck);
+    const isNeg2 = core.LLVMBuildLoad2(builder, core.LLVMInt1Type(), isNegPtr, "isneg2");
+    _ = core.LLVMBuildCondBr(builder, isNeg2, negBody, writeBlock);
+
+    // --- negBody ---
+    core.LLVMPositionBuilderAtEnd(builder, negBody);
+    const posN = core.LLVMBuildLoad2(builder, i32Type, posPtr, "posn");
+    const newPosN = core.LLVMBuildSub(builder, posN, core.LLVMConstInt(i32Type, 1, 0), "newposn");
+    _ = core.LLVMBuildStore(builder, newPosN, posPtr);
+    const bufIdxN = core.LLVMBuildGEP2(builder, i8Type, buf, @constCast(&[_]types.LLVMValueRef{newPosN}), 1, "bufidxn");
+    _ = core.LLVMBuildStore(builder, core.LLVMConstInt(i8Type, 45, 0), bufIdxN);
+    _ = core.LLVMBuildBr(builder, writeBlock);
+
+    // --- writeBlock: syscall write ---
+    core.LLVMPositionBuilderAtEnd(builder, writeBlock);
+    const finalPos = core.LLVMBuildLoad2(builder, i32Type, posPtr, "finalpos");
+    const bufStart = core.LLVMBuildGEP2(builder, i8Type, buf, @constCast(&[_]types.LLVMValueRef{finalPos}), 1, "bufstart");
+    const writeLen = core.LLVMBuildSub(builder, core.LLVMConstInt(i32Type, 20, 0), finalPos, "writelen");
+
+    const bufStartInt = core.LLVMBuildPtrToInt(builder, bufStart, i64Type, "bufstartint");
+    const writeLenExt = core.LLVMBuildSExt(builder, writeLen, i64Type, "writelen64");
+
+    var sysParams: [4]types.LLVMTypeRef = .{ i64Type, i64Type, i64Type, i64Type };
+    const sysFnType = core.LLVMFunctionType(i64Type, &sysParams, 4, 0);
+    const sysAsm = core.LLVMGetInlineAsm(
+        sysFnType,
+        @constCast("syscall"),
+        7,
+        @constCast("={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}"),
+        56,
+        1,
+        0,
+        .LVMInlineAsmDialectATT,
+        0,
+    );
+
+    var writeArgs: [4]types.LLVMValueRef = .{
+        core.LLVMConstInt(i64Type, 1, 0),
+        core.LLVMConstInt(i64Type, 1, 0),
+        bufStartInt,
+        writeLenExt,
+    };
+    _ = core.LLVMBuildCall2(builder, sysFnType, sysAsm, &writeArgs, 4, "");
+
+    // Write newline
+    const nlBuf = core.LLVMBuildAlloca(builder, i8Type, "nl");
+    _ = core.LLVMBuildStore(builder, core.LLVMConstInt(i8Type, 10, 0), nlBuf);
+    const nlPtr = core.LLVMBuildPtrToInt(builder, nlBuf, i64Type, "nlptr");
+    var nlArgs: [4]types.LLVMValueRef = .{
+        core.LLVMConstInt(i64Type, 1, 0),
+        core.LLVMConstInt(i64Type, 1, 0),
+        nlPtr,
+        core.LLVMConstInt(i64Type, 1, 0),
+    };
+    _ = core.LLVMBuildCall2(builder, sysFnType, sysAsm, &nlArgs, 4, "");
+}
+
+fn generateReadLine(
+    builder: types.LLVMBuilderRef,
+    module: types.LLVMModuleRef,
+    locals: *std.StringHashMap(LocalVar),
+    call: ir.ZSIRCall,
+    allocator: std.mem.Allocator,
+) !void {
+    _ = allocator;
+    _ = module;
+
+    const i32Type = core.LLVMInt32Type();
+    const i64Type = core.LLVMInt64Type();
+    const i8Type = core.LLVMInt8Type();
+    const ptrType = core.LLVMPointerType(i8Type, 0);
+
+    // Allocate 1024-byte buffer on stack
+    const bufSize = core.LLVMConstInt(i32Type, 1024, 0);
+    const buf = core.LLVMBuildArrayAlloca(builder, i8Type, bufSize, "readbuf");
+
+    // syscall read(0, buf, 1024)
+    var sysParams: [4]types.LLVMTypeRef = .{ i64Type, i64Type, i64Type, i64Type };
+    const sysFnType = core.LLVMFunctionType(i64Type, &sysParams, 4, 0);
+    const sysAsm = core.LLVMGetInlineAsm(
+        sysFnType,
+        @constCast("syscall"),
+        7,
+        @constCast("={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}"),
+        56,
+        1,
+        0,
+        .LVMInlineAsmDialectATT,
+        0,
+    );
+
+    const bufInt = core.LLVMBuildPtrToInt(builder, buf, i64Type, "bufint");
+    var readArgs: [4]types.LLVMValueRef = .{
+        core.LLVMConstInt(i64Type, 0, 0), // syscall nr = 0 (read)
+        core.LLVMConstInt(i64Type, 0, 0), // fd = 0 (stdin)
+        bufInt,
+        core.LLVMConstInt(i64Type, 1024, 0),
+    };
+    const bytesRead64 = core.LLVMBuildCall2(builder, sysFnType, sysAsm, &readArgs, 4, "bytesread");
+    var bytesRead = core.LLVMBuildTrunc(builder, bytesRead64, i32Type, "bytesread32");
+
+    // Strip trailing newline: if bytesRead > 0 && buf[bytesRead-1] == '\n', bytesRead--
+    const currentFunc = core.LLVMGetBasicBlockParent(core.LLVMGetInsertBlock(builder));
+    const stripBlock = core.LLVMAppendBasicBlock(currentFunc, "strip");
+    const doneBlock = core.LLVMAppendBasicBlock(currentFunc, "stripdone");
+
+    const gtZero = core.LLVMBuildICmp(builder, .LLVMIntSGT, bytesRead, core.LLVMConstInt(i32Type, 0, 0), "gtz");
+    _ = core.LLVMBuildCondBr(builder, gtZero, stripBlock, doneBlock);
+
+    core.LLVMPositionBuilderAtEnd(builder, stripBlock);
+    const lastIdx = core.LLVMBuildSub(builder, bytesRead, core.LLVMConstInt(i32Type, 1, 0), "lastidx");
+    const lastPtr = core.LLVMBuildGEP2(builder, i8Type, buf, @constCast(&[_]types.LLVMValueRef{lastIdx}), 1, "lastptr");
+    const lastChar = core.LLVMBuildLoad2(builder, i8Type, lastPtr, "lastch");
+    const isNl = core.LLVMBuildICmp(builder, .LLVMIntEQ, lastChar, core.LLVMConstInt(i8Type, 10, 0), "isnl");
+    const stripped = core.LLVMBuildSelect(builder, isNl, lastIdx, bytesRead, "stripped");
+    _ = core.LLVMBuildBr(builder, doneBlock);
+
+    core.LLVMPositionBuilderAtEnd(builder, doneBlock);
+    // PHI for final length
+    const phi = core.LLVMBuildPhi(builder, i32Type, "finallen");
+    var phiVals: [2]types.LLVMValueRef = .{ bytesRead, stripped };
+    const preStripBlock = core.LLVMGetPreviousBasicBlock(stripBlock);
+    var phiBlocks: [2]types.LLVMBasicBlockRef = .{ preStripBlock, stripBlock };
+    core.LLVMAddIncoming(phi, &phiVals, &phiBlocks, 2);
+
+    bytesRead = phi;
+
+    // Create ZSString struct { i32 len, i8* ptr }
+    const strType = getStringType();
+    const strPtr = core.LLVMBuildAlloca(builder, strType, "readstr");
+    var strVal = core.LLVMGetUndef(strType);
+    strVal = core.LLVMBuildInsertValue(builder, strVal, bytesRead, 0, "withlen");
+    const bufAsPtr = core.LLVMBuildBitCast(builder, buf, ptrType, "bufptr");
+    strVal = core.LLVMBuildInsertValue(builder, strVal, bufAsPtr, 1, "withptr");
+    _ = core.LLVMBuildStore(builder, strVal, strPtr);
+    try locals.put(call.resultName, LocalVar{ .ptr = strPtr, .ty = strType });
 }
 
 fn mapType(name: []const u8) types.LLVMTypeRef {

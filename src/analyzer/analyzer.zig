@@ -80,6 +80,10 @@ fn typeToString(zsType: Symbol.ZSType) []const u8 {
 }
 
 pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator, deps: *const std.StringHashMap(AnalyzeResult)) !AnalyzeResult {
+    return analyzeWithPrelude(module, allocator, deps, null);
+}
+
+pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, deps: *const std.StringHashMap(AnalyzeResult), preludeExports: ?*const SymbolTable) !AnalyzeResult {
     var errors = try std.ArrayList(AnalyzeError).initCapacity(allocator, 1);
     defer errors.deinit(allocator);
     var tableStack = try sts.create(allocator);
@@ -130,6 +134,21 @@ pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator, deps: *const 
         try analyzer.overloads.put("load_library", entries);
     }
 
+    // Register intrinsics
+    try analyzer.registerIntrinsic(allocator, "__syscall3", &.{ "number", "number", "number", "number" }, .number);
+    try analyzer.registerIntrinsic(allocator, "__ptr_to_int", &.{"string"}, .number);
+    try analyzer.registerIntrinsic(allocator, "__str_len", &.{"string"}, .number);
+    try analyzer.registerIntrinsic(allocator, "__print_number", &.{"number"}, .unknown);
+    try analyzer.registerIntrinsic(allocator, "__read_line", &.{}, .string);
+
+    // Inject prelude exports into scope
+    if (preludeExports) |exports| {
+        var iter = exports.iterator();
+        while (iter.next()) |entry| {
+            try tableStack.put(entry.value_ptr.*);
+        }
+    }
+
     // Pre-pass: register all function overloads
     try analyzer.registerFunctions(module);
 
@@ -153,6 +172,22 @@ pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator, deps: *const 
         .allocatedTypes = analyzer.allocatedTypes,
         .allocatedSliceLists = analyzer.allocatedSliceLists,
     };
+}
+
+fn registerIntrinsic(self: *Self, allocator: std.mem.Allocator, name: []const u8, argTypeNames: []const []const u8, retType: Symbol.ZSType) !void {
+    const argTypes = try allocator.alloc([]const u8, argTypeNames.len);
+    try self.allocatedSliceLists.append(allocator, argTypes);
+    for (argTypeNames, 0..) |t, i| {
+        argTypes[i] = t;
+    }
+    var entries = try std.ArrayList(OverloadEntry).initCapacity(allocator, 1);
+    try entries.append(allocator, .{
+        .argTypes = argTypes,
+        .mangledName = name,
+        .retType = retType,
+        .external = true,
+    });
+    try self.overloads.put(name, entries);
 }
 
 fn registerFunctions(self: *Self, module: zsm.ZSModule) !void {
@@ -298,6 +333,7 @@ fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) !Symbol.ZSType {
         .call => self.analyzeCall(expr.call),
         .reference => self.analyzeReference(expr.reference),
         .if_expr => self.analyzeIfExpr(expr.if_expr),
+        .while_expr => self.analyzeWhileExpr(expr.while_expr),
         .binary => self.analyzeBinary(expr.binary),
         .block => self.analyzeBlock(expr.block),
         .return_expr => self.analyzeReturn(expr.return_expr),
@@ -472,10 +508,25 @@ fn analyzeIfExpr(self: *Self, ifExpr: ast.expr.ZSIfExpr) Error!Symbol.ZSType {
     return thenType;
 }
 
+fn analyzeWhileExpr(self: *Self, whileExpr: ast.expr.ZSWhileExpr) Error!Symbol.ZSType {
+    _ = try self.analyzeExpr(whileExpr.condition.*);
+    _ = try self.analyzeExpr(whileExpr.body.*);
+    return .unknown;
+}
+
 fn analyzeBinary(self: *Self, binary: ast.expr.ZSBinary) Error!Symbol.ZSType {
     _ = try self.analyzeExpr(binary.lhs.*);
     _ = try self.analyzeExpr(binary.rhs.*);
-    return Symbol.ZSType.boolean;
+    const op = binary.op;
+    // Comparison operators return boolean
+    if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=") or
+        std.mem.eql(u8, op, ">") or std.mem.eql(u8, op, "<") or
+        std.mem.eql(u8, op, ">=") or std.mem.eql(u8, op, "<="))
+    {
+        return Symbol.ZSType.boolean;
+    }
+    // Arithmetic operators return number
+    return Symbol.ZSType.number;
 }
 
 fn analyzeBlock(self: *Self, block: ast.expr.ZSBlock) Error!Symbol.ZSType {

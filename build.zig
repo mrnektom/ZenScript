@@ -53,6 +53,9 @@ pub fn build(b: *std.Build) !void {
     exe.root_module.addImport("clang", clang_mod); // <== add clang module
     b.installArtifact(exe);
 
+    // Install stdlib files
+    b.installFile("stdlib/prelude.zs", "stdlib/prelude.zs");
+
     const run_step = b.step("run", "Run the app");
 
     const run_cmd = b.addRunArtifact(exe);

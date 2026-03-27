@@ -39,6 +39,7 @@ fn currentTokenType(self: *Tokenizer) Error!?TokenType {
     return switch (firstChar) {
         '=', '!' => .punctuation,
         '(', ')', ':', '{', '}', ',' => .punctuation,
+        '+', '-', '*', '/', '%', '>', '<' => .punctuation,
         '"' => .string,
         else => e: {
             if (std.ascii.isDigit(firstChar)) {
@@ -105,7 +106,15 @@ fn eatPunc(self: *Tokenizer) void {
             self.shift();
             if (self.peek() == @as(u8, '=')) self.shift();
         },
-        '(', ')', ':', '{', '}', ',' => self.shift(),
+        '>' => {
+            self.shift();
+            if (self.peek() == @as(u8, '=')) self.shift();
+        },
+        '<' => {
+            self.shift();
+            if (self.peek() == @as(u8, '=')) self.shift();
+        },
+        '(', ')', ':', '{', '}', ',', '+', '-', '*', '/', '%' => self.shift(),
 
         else => {},
     }

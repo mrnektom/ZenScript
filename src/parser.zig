@@ -179,7 +179,7 @@ fn nextReassign(self: *Self) Error!?ast.stmt.ZSReassign {
 }
 
 fn isKeyword(value: []const u8) bool {
-    const keywords = [_][]const u8{ "if", "return", "else", "let", "const", "fn", "external", "true", "false", "import", "export", "from", "as" };
+    const keywords = [_][]const u8{ "if", "while", "return", "else", "let", "const", "fn", "external", "true", "false", "import", "export", "from", "as" };
     for (keywords) |kw| {
         if (std.mem.eql(u8, value, kw)) return true;
     }
@@ -189,6 +189,7 @@ fn isKeyword(value: []const u8) bool {
 fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
     const expr = blk: {
         if (try self.nextIfExpr()) |e| break :blk ast.expr.ZSExpr{ .if_expr = e };
+        if (try self.nextWhileExpr()) |e| break :blk ast.expr.ZSExpr{ .while_expr = e };
         if (try self.nextReturn()) |r| break :blk ast.expr.ZSExpr{ .return_expr = r };
         if (try self.nextBlock()) |b| break :blk ast.expr.ZSExpr{ .block = b };
         if (try self.nextNumber()) |n| break :blk ast.expr.ZSExpr{ .number = n };
@@ -220,6 +221,15 @@ fn nextBinaryRhs(self: *Self, lhs: ast.expr.ZSExpr) Error!?ast.expr.ZSBinary {
     const op = blk: {
         if (self.checkToken("==")) break :blk "==";
         if (self.checkToken("!=")) break :blk "!=";
+        if (self.checkToken(">=")) break :blk ">=";
+        if (self.checkToken("<=")) break :blk "<=";
+        if (self.checkToken(">")) break :blk ">";
+        if (self.checkToken("<")) break :blk "<";
+        if (self.checkToken("+")) break :blk "+";
+        if (self.checkToken("-")) break :blk "-";
+        if (self.checkToken("*")) break :blk "*";
+        if (self.checkToken("/")) break :blk "/";
+        if (self.checkToken("%")) break :blk "%";
         return null;
     };
     self.shiftToken();
@@ -278,6 +288,35 @@ fn nextIfExpr(self: *Self) Error!?ast.expr.ZSIfExpr {
         .else_branch = elseBranch,
         .startPos = startPos,
         .endPos = endPos,
+    };
+}
+
+fn nextWhileExpr(self: *Self) Error!?ast.expr.ZSWhileExpr {
+    if (!(self.checkToken("while"))) return null;
+    const whileToken = try self.peekToken();
+    const startPos = whileToken.startPos;
+    self.shiftToken();
+
+    // Optional parens around condition
+    const hasParen = self.checkToken("(");
+    if (hasParen) self.shiftToken();
+
+    const condition = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+    const condPtr = try self.allocator.create(ast.expr.ZSExpr);
+    condPtr.* = condition;
+
+    if (hasParen) try self.expectToken(")");
+
+    // Body: block or expression
+    const bodyExpr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+    const bodyPtr = try self.allocator.create(ast.expr.ZSExpr);
+    bodyPtr.* = bodyExpr;
+
+    return ast.expr.ZSWhileExpr{
+        .condition = condPtr,
+        .body = bodyPtr,
+        .startPos = startPos,
+        .endPos = bodyExpr.end(),
     };
 }
 
@@ -518,7 +557,32 @@ fn nextString(self: *Self) !?ast.expr.ZSString {
     const value: [:0]const u8 = blk: {
         if (std.mem.startsWith(u8, token.value, "\"") and std.mem.endsWith(u8, token.value, "\"")) {
             const slice = token.value[1..(token.value.len - 1)];
-            const cStr = try self.allocator.dupeZ(u8, slice);
+            // Process escape sequences
+            var buf = try std.ArrayList(u8).initCapacity(self.allocator, slice.len);
+            defer buf.deinit(self.allocator);
+            var i: usize = 0;
+            while (i < slice.len) {
+                if (slice[i] == '\\' and i + 1 < slice.len) {
+                    switch (slice[i + 1]) {
+                        'n' => try buf.append(self.allocator, '\n'),
+                        't' => try buf.append(self.allocator, '\t'),
+                        'r' => try buf.append(self.allocator, '\r'),
+                        '\\' => try buf.append(self.allocator, '\\'),
+                        '"' => try buf.append(self.allocator, '"'),
+                        '0' => try buf.append(self.allocator, 0),
+                        else => {
+                            try buf.append(self.allocator, slice[i]);
+                            try buf.append(self.allocator, slice[i + 1]);
+                        },
+                    }
+                    i += 2;
+                } else {
+                    try buf.append(self.allocator, slice[i]);
+                    i += 1;
+                }
+            }
+            const cStr = try self.allocator.allocSentinel(u8, buf.items.len, 0);
+            @memcpy(cStr, buf.items);
             break :blk cStr;
         }
 

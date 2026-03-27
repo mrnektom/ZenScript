@@ -9,6 +9,7 @@ const ZSExprType = enum {
     call,
     reference,
     if_expr,
+    while_expr,
     binary,
     block,
     return_expr,
@@ -21,6 +22,7 @@ pub const ZSExpr = union(ZSExprType) {
     call: ZSCall,
     reference: ZSReference,
     if_expr: ZSIfExpr,
+    while_expr: ZSWhileExpr,
     binary: ZSBinary,
     block: ZSBlock,
     return_expr: ZSReturn,
@@ -30,6 +32,7 @@ pub const ZSExpr = union(ZSExprType) {
             .call => self.call.deinit(allocator),
             .string => self.string.deinit(allocator),
             .if_expr => self.if_expr.deinit(allocator),
+            .while_expr => self.while_expr.deinit(allocator),
             .binary => self.binary.deinit(allocator),
             .block => self.block.deinit(allocator),
             .return_expr => self.return_expr.deinit(allocator),
@@ -45,6 +48,7 @@ pub const ZSExpr = union(ZSExprType) {
             .call => self.call.startPos,
             .reference => self.reference.startPos,
             .if_expr => self.if_expr.startPos,
+            .while_expr => self.while_expr.startPos,
             .binary => self.binary.startPos,
             .block => self.block.startPos,
             .return_expr => self.return_expr.startPos,
@@ -59,6 +63,7 @@ pub const ZSExpr = union(ZSExprType) {
             .call => self.call.endPos,
             .reference => self.reference.endPos,
             .if_expr => self.if_expr.endPos,
+            .while_expr => self.while_expr.endPos,
             .binary => self.binary.endPos,
             .block => self.block.endPos,
             .return_expr => self.return_expr.endPos,
@@ -107,6 +112,20 @@ pub const ZSIfExpr = struct {
             eb.deinit(allocator);
             allocator.destroy(eb);
         }
+    }
+};
+
+pub const ZSWhileExpr = struct {
+    condition: *ZSExpr,
+    body: *ZSExpr,
+    startPos: usize,
+    endPos: usize,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        self.condition.deinit(allocator);
+        allocator.destroy(self.condition);
+        self.body.deinit(allocator);
+        allocator.destroy(self.body);
     }
 };
 

@@ -102,6 +102,7 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
         .call => self.generateCall(expr.call),
         .reference => self.generateReference(expr.reference),
         .if_expr => self.generateIfExpr(expr.if_expr),
+        .while_expr => self.generateWhileExpr(expr.while_expr),
         .binary => self.generateBinary(expr.binary),
         .block => self.generateBlock(expr.block),
         .return_expr => self.generateReturn(expr.return_expr),
@@ -147,7 +148,18 @@ fn generateVariable(self: *Self, variable: ast.stmt.ZSVar) ![]const u8 {
 
 fn generateReassign(self: *Self, reassign: ast.stmt.ZSReassign) ![]const u8 {
     const irName = try self.generateExpr(reassign.expr);
-    try self.varNames.put(reassign.name, irName);
+    // Get the existing IR name for this variable
+    const existingName = self.varNames.get(reassign.name) orelse reassign.name;
+    // Emit a store instruction to update the existing variable's alloca
+    try self.instructions.append(
+        self.allocator,
+        ir.ZSIR{
+            .store = ir.ZSIRStore{
+                .target = existingName,
+                .value = irName,
+            },
+        },
+    );
     return irName;
 }
 
@@ -295,19 +307,67 @@ fn generateBinary(self: *Self, binary: ast.expr.ZSBinary) Error![]const u8 {
     const lhsName = try self.generateExpr(binary.lhs.*);
     const rhsName = try self.generateExpr(binary.rhs.*);
     const resultName = try self.generateName();
+    const op = binary.op;
+
+    const isCompare = std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=") or
+        std.mem.eql(u8, op, ">") or std.mem.eql(u8, op, "<") or
+        std.mem.eql(u8, op, ">=") or std.mem.eql(u8, op, "<=");
+
+    if (isCompare) {
+        try self.instructions.append(
+            self.allocator,
+            ir.ZSIR{
+                .compare = ir.ZSIRCompare{
+                    .resultName = resultName,
+                    .lhs = lhsName,
+                    .rhs = rhsName,
+                    .op = op,
+                },
+            },
+        );
+    } else {
+        try self.instructions.append(
+            self.allocator,
+            ir.ZSIR{
+                .arith = ir.ZSIRArith{
+                    .resultName = resultName,
+                    .lhs = lhsName,
+                    .rhs = rhsName,
+                    .op = op,
+                },
+            },
+        );
+    }
+    return resultName;
+}
+
+fn generateWhileExpr(self: *Self, whileExpr: ast.expr.ZSWhileExpr) Error![]const u8 {
+    // Generate condition instructions into a separate list
+    var condInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
+    defer condInstructions.deinit(self.allocator);
+    const outerInstructions = self.instructions;
+    self.instructions = &condInstructions;
+    const condName = try self.generateExpr(whileExpr.condition.*);
+    self.instructions = outerInstructions;
+
+    // Generate body instructions
+    var bodyInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 8);
+    defer bodyInstructions.deinit(self.allocator);
+    self.instructions = &bodyInstructions;
+    _ = try self.generateExpr(whileExpr.body.*);
+    self.instructions = outerInstructions;
 
     try self.instructions.append(
         self.allocator,
         ir.ZSIR{
-            .compare = ir.ZSIRCompare{
-                .resultName = resultName,
-                .lhs = lhsName,
-                .rhs = rhsName,
-                .op = binary.op,
+            .loop = ir.ZSIRLoop{
+                .condition = try self.allocator.dupe(ir.ZSIR, condInstructions.items),
+                .conditionName = condName,
+                .body = try self.allocator.dupe(ir.ZSIR, bodyInstructions.items),
             },
         },
     );
-    return resultName;
+    return "";
 }
 
 fn generateBlock(self: *Self, block: ast.expr.ZSBlock) Error![]const u8 {
