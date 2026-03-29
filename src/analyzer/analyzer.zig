@@ -1106,6 +1106,8 @@ fn analyzeIndexAccess(self: *Self, ia: ast.expr.ZSIndexAccess) Error!Symbol.ZSTy
     _ = try self.analyzeExpr(ia.index.*);
     return switch (subjectType) {
         .array_type => |at| at.element_type.*,
+        .pointer => |pt| pt.*,
+        .long => .char,
         else => blk: {
             try self.recordError(ia, "Index access on non-array type");
             break :blk Symbol.ZSType.unknown;

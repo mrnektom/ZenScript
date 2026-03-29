@@ -1079,6 +1079,23 @@ fn generateIndexAccess(
     const indexLocal = locals.get(ia.index) orelse return;
 
     const indexVal = core.LLVMBuildLoad2(builder, indexLocal.ty, indexLocal.ptr, "idx");
+
+    // Check if subject is an i64 (pointer/long) — use pointer arithmetic instead of GEP
+    const i64Type = core.LLVMInt64Type();
+    if (subjectLocal.ty == i64Type) {
+        const addr = core.LLVMBuildLoad2(builder, i64Type, subjectLocal.ptr, "addr");
+        const idx64 = core.LLVMBuildSExt(builder, indexVal, i64Type, "idx64");
+        const sum = core.LLVMBuildAdd(builder, addr, idx64, "ptradd");
+        const i8PtrType = core.LLVMPointerType(core.LLVMInt8Type(), 0);
+        const rawPtr = core.LLVMBuildIntToPtr(builder, sum, i8PtrType, "rawptr");
+        const i8Type = core.LLVMInt8Type();
+        const val = core.LLVMBuildLoad2(builder, i8Type, rawPtr, "byteval");
+        const resPtr = core.LLVMBuildAlloca(builder, i8Type, "idxres");
+        _ = core.LLVMBuildStore(builder, val, resPtr);
+        try locals.put(ia.resultName, LocalVar{ .ptr = resPtr, .ty = i8Type });
+        return;
+    }
+
     const arrType = subjectLocal.ty;
     const elemType = core.LLVMGetElementType(arrType);
 
@@ -1104,6 +1121,28 @@ fn generateIndexStore(
     const valueLocal = locals.get(istor.value) orelse return;
 
     const indexVal = core.LLVMBuildLoad2(builder, indexLocal.ty, indexLocal.ptr, "stidx");
+
+    // Check if subject is an i64 (pointer/long) — use pointer arithmetic instead of GEP
+    const i64Type = core.LLVMInt64Type();
+    if (subjectLocal.ty == i64Type) {
+        const addr = core.LLVMBuildLoad2(builder, i64Type, subjectLocal.ptr, "addr");
+        const idx64 = core.LLVMBuildSExt(builder, indexVal, i64Type, "idx64");
+        const sum = core.LLVMBuildAdd(builder, addr, idx64, "ptradd");
+        const i8PtrType = core.LLVMPointerType(core.LLVMInt8Type(), 0);
+        const rawPtr = core.LLVMBuildIntToPtr(builder, sum, i8PtrType, "rawptr");
+        var val = core.LLVMBuildLoad2(builder, valueLocal.ty, valueLocal.ptr, "stval");
+        const i8Type = core.LLVMInt8Type();
+        // Auto-trunc if value is wider than i8
+        if (core.LLVMGetTypeKind(valueLocal.ty) == .LLVMIntegerTypeKind) {
+            const valWidth = core.LLVMGetIntTypeWidth(valueLocal.ty);
+            if (valWidth > 8) {
+                val = core.LLVMBuildTrunc(builder, val, i8Type, "sttrunc");
+            }
+        }
+        _ = core.LLVMBuildStore(builder, val, rawPtr);
+        return;
+    }
+
     const arrType = subjectLocal.ty;
     const elemType = core.LLVMGetElementType(arrType);
 

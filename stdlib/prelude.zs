@@ -59,3 +59,33 @@ export fn read_line(): String {
   }
   return String { len: bytes, data: ptr(buf) }
 }
+
+export fn char_at(s: String, i: number): char = s.data[i]
+
+export fn str_eq(a: String, b: String): boolean {
+  if (a.len != b.len) return false
+  for (let i = 0; i < a.len; i = i + 1) {
+    if (char_at(a, i) != char_at(b, i)) return false
+  }
+  return true
+}
+
+export fn str_concat(a: String, b: String): String {
+  let total = a.len + b.len
+  let buf = alloc(total)
+  for (let i = 0; i < a.len; i = i + 1) {
+    buf[i] = char_at(a, i)
+  }
+  for (let i = 0; i < b.len; i = i + 1) {
+    buf[a.len + i] = char_at(b, i)
+  }
+  return String { len: total, data: buf }
+}
+
+export fn substr(s: String, start: number, length: number): String {
+  let buf = alloc(length)
+  for (let i = 0; i < length; i = i + 1) {
+    buf[i] = char_at(s, start + i)
+  }
+  return String { len: length, data: buf }
+}
