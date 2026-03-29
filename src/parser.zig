@@ -1249,6 +1249,7 @@ fn nextNegativeNumber(self: *Self) Error!?ast.expr.ZSNumber {
         .value = negValue,
         .startPos = token.startPos,
         .endPos = next.endPos,
+        .allocated = true,
     };
 }
 

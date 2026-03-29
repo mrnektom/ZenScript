@@ -66,7 +66,8 @@ pub const ZSExpr = union(ZSExprType) {
             .index_access => self.index_access.deinit(allocator),
             .enum_init => self.enum_init.deinit(allocator),
             .match_expr => self.match_expr.deinit(allocator),
-            .number, .char, .boolean, .reference, .break_expr, .continue_expr => {},
+            .number => self.number.deinit(allocator),
+            .char, .boolean, .reference, .break_expr, .continue_expr => {},
         }
     }
 
@@ -140,6 +141,13 @@ pub const ZSNumber = struct {
     value: []const u8,
     startPos: usize,
     endPos: usize,
+    allocated: bool = false,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        if (self.allocated) {
+            allocator.free(self.value);
+        }
+    }
 };
 pub const ZSString = struct {
     value: [:0]const u8,
