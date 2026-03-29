@@ -45,7 +45,7 @@ fn process(x: string): string = x
 
 ### Types
 
-Supported types: `number` (i32), `long` (i64), `int` (alias for number), `short` (i16), `byte` (i8), `char` (i8), `boolean`, `void`, arrays, and user-defined structs.
+Supported types: `number` (i32), `long` (i64), `int` (alias for number), `short` (i16), `byte` (i8), `char` (i8), `boolean`, `void`, arrays, user-defined structs, and enums.
 
 Type annotations are used on function arguments and return types:
 
@@ -70,6 +70,29 @@ let v = p.x
 // Export structs for use in other modules
 export struct String { len: number, data: Pointer<number> }
 ```
+
+### Enums and match
+
+```zs
+enum Option {
+  Some(number),
+  None
+}
+
+let x = Option.Some(42)
+let y = Option.None
+
+let result = match x {
+  Option.Some(v) -> v + 1,
+  Option.None -> 0
+}
+
+// Import variant names into scope
+use Option.{Some, None}
+let z = Some(10)
+```
+
+Enums are tagged unions (`{ i32 tag, payload }`). Match expressions require exhaustive coverage of all variants. Payload binding (`v` above) extracts the variant's value.
 
 ### Pointers
 
