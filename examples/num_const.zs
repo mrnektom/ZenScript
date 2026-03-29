@@ -1,7 +1,4 @@
-external fn print(msg: string): void
-external fn print_number(n: number): void
 
-fn print(n: number): void = print_number(n)
 
 fn get_ten(): number = 10
 

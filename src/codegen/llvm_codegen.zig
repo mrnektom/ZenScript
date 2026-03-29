@@ -106,6 +106,11 @@ fn generateInstruction(
         .arith => try generateArith(builder, locals, instruction.arith, allocator),
         .loop => try generateLoop(builder, module, locals, instruction.loop, allocator),
         .module_init => try generateModuleInit(builder, module, instruction.module_init, allocator),
+        // Struct/pointer instructions — stubs for future implementation
+        .struct_init => {},
+        .field_access => {},
+        .ptr_op => {},
+        .deref_op => {},
     }
 }
 
@@ -363,20 +368,39 @@ fn generateCompare(
     cmp: ir.ZSIRCompare,
     allocator: std.mem.Allocator,
 ) !void {
+    _ = allocator;
+
     // Load LHS
     var lhsVal: types.LLVMValueRef = undefined;
+    var lhsWidth: c_uint = 32;
     if (locals.get(cmp.lhs)) |local| {
         lhsVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "lhs");
+        if (core.LLVMGetTypeKind(local.ty) == .LLVMIntegerTypeKind) {
+            lhsWidth = core.LLVMGetIntTypeWidth(local.ty);
+        }
     } else {
         return;
     }
 
     // Load RHS
     var rhsVal: types.LLVMValueRef = undefined;
+    var rhsWidth: c_uint = 32;
     if (locals.get(cmp.rhs)) |local| {
         rhsVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "rhs");
+        if (core.LLVMGetTypeKind(local.ty) == .LLVMIntegerTypeKind) {
+            rhsWidth = core.LLVMGetIntTypeWidth(local.ty);
+        }
     } else {
         return;
+    }
+
+    // Widen narrower operand to match the wider one
+    const widerWidth = @max(lhsWidth, rhsWidth);
+    if (lhsWidth < widerWidth) {
+        lhsVal = core.LLVMBuildSExt(builder, lhsVal, core.LLVMIntType(widerWidth), "cmplhsext");
+    }
+    if (rhsWidth < widerWidth) {
+        rhsVal = core.LLVMBuildSExt(builder, rhsVal, core.LLVMIntType(widerWidth), "cmprhsext");
     }
 
     const pred: types.LLVMIntPredicate = if (std.mem.eql(u8, cmp.op, "=="))
@@ -398,8 +422,6 @@ fn generateCompare(
     const ptr = core.LLVMBuildAlloca(builder, core.LLVMInt1Type(), "cmpres");
     _ = core.LLVMBuildStore(builder, cmpResult, ptr);
     try locals.put(cmp.resultName, LocalVar{ .ptr = ptr, .ty = core.LLVMInt1Type() });
-
-    _ = allocator;
 }
 
 fn generateArith(
@@ -411,17 +433,35 @@ fn generateArith(
     _ = allocator;
 
     var lhsVal: types.LLVMValueRef = undefined;
+    var lhsWidth: c_uint = 32;
     if (locals.get(arithInst.lhs)) |local| {
         lhsVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "lhs");
+        if (core.LLVMGetTypeKind(local.ty) == .LLVMIntegerTypeKind) {
+            lhsWidth = core.LLVMGetIntTypeWidth(local.ty);
+        }
     } else {
         return;
     }
 
     var rhsVal: types.LLVMValueRef = undefined;
+    var rhsWidth: c_uint = 32;
     if (locals.get(arithInst.rhs)) |local| {
         rhsVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "rhs");
+        if (core.LLVMGetTypeKind(local.ty) == .LLVMIntegerTypeKind) {
+            rhsWidth = core.LLVMGetIntTypeWidth(local.ty);
+        }
     } else {
         return;
+    }
+
+    // Widen narrower operand to match the wider one
+    const resultWidth = @max(lhsWidth, rhsWidth);
+    const resultTy = core.LLVMIntType(resultWidth);
+    if (lhsWidth < resultWidth) {
+        lhsVal = core.LLVMBuildSExt(builder, lhsVal, resultTy, "lhsext");
+    }
+    if (rhsWidth < resultWidth) {
+        rhsVal = core.LLVMBuildSExt(builder, rhsVal, resultTy, "rhsext");
     }
 
     const result = if (std.mem.eql(u8, arithInst.op, "+"))
@@ -435,9 +475,9 @@ fn generateArith(
     else
         core.LLVMBuildSRem(builder, lhsVal, rhsVal, "rem");
 
-    const ptr = core.LLVMBuildAlloca(builder, core.LLVMInt32Type(), "arithres");
+    const ptr = core.LLVMBuildAlloca(builder, resultTy, "arithres");
     _ = core.LLVMBuildStore(builder, result, ptr);
-    try locals.put(arithInst.resultName, LocalVar{ .ptr = ptr, .ty = core.LLVMInt32Type() });
+    try locals.put(arithInst.resultName, LocalVar{ .ptr = ptr, .ty = resultTy });
 }
 
 fn generateLoop(
@@ -549,7 +589,21 @@ fn generateStore(
 ) void {
     const targetLocal = locals.get(storeInst.target) orelse return;
     const valueLocal = locals.get(storeInst.value) orelse return;
-    const val = core.LLVMBuildLoad2(builder, valueLocal.ty, valueLocal.ptr, "storeval");
+    var val = core.LLVMBuildLoad2(builder, valueLocal.ty, valueLocal.ptr, "storeval");
+
+    // Coerce value type to match target type
+    const targetKind = core.LLVMGetTypeKind(targetLocal.ty);
+    const valueKind = core.LLVMGetTypeKind(valueLocal.ty);
+    if (targetKind == .LLVMIntegerTypeKind and valueKind == .LLVMIntegerTypeKind) {
+        const tw = core.LLVMGetIntTypeWidth(targetLocal.ty);
+        const vw = core.LLVMGetIntTypeWidth(valueLocal.ty);
+        if (vw < tw) {
+            val = core.LLVMBuildSExt(builder, val, targetLocal.ty, "storeext");
+        } else if (vw > tw) {
+            val = core.LLVMBuildTrunc(builder, val, targetLocal.ty, "storetrunc");
+        }
+    }
+
     _ = core.LLVMBuildStore(builder, val, targetLocal.ptr);
 }
 
@@ -629,8 +683,12 @@ fn generateCall(
         try generateStrLen(builder, locals, call);
         return;
     }
-    if (std.mem.eql(u8, call.fnName, "__print_number")) {
-        try generatePrintNumber(builder, module, locals, call, allocator);
+    if (std.mem.eql(u8, call.fnName, "__alloc_buf")) {
+        try generateAllocBuf(builder, locals, call);
+        return;
+    }
+    if (std.mem.eql(u8, call.fnName, "__write_byte")) {
+        try generateWriteByte(builder, locals, call);
         return;
     }
     if (std.mem.eql(u8, call.fnName, "__read_line")) {
@@ -763,151 +821,79 @@ fn generateStrLen(
     }
 }
 
-fn generatePrintNumber(
+fn generateAllocBuf(
     builder: types.LLVMBuilderRef,
-    module: types.LLVMModuleRef,
     locals: *std.StringHashMap(LocalVar),
     call: ir.ZSIRCall,
-    allocator: std.mem.Allocator,
 ) !void {
-    _ = allocator;
-    _ = module;
     if (call.argNames.len != 1) return;
-
-    var numVal: types.LLVMValueRef = undefined;
-    if (locals.get(call.argNames[0])) |local| {
-        numVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "num");
-    } else {
-        return;
-    }
 
     const i32Type = core.LLVMInt32Type();
     const i64Type = core.LLVMInt64Type();
     const i8Type = core.LLVMInt8Type();
 
-    // Allocate a 20-byte buffer on the stack for itoa
-    const bufSize = core.LLVMConstInt(i32Type, 20, 0);
-    const buf = core.LLVMBuildArrayAlloca(builder, i8Type, bufSize, "numbuf");
+    // Load size argument
+    var sizeVal: types.LLVMValueRef = undefined;
+    if (locals.get(call.argNames[0])) |local| {
+        sizeVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "bufsize");
+    } else {
+        return;
+    }
 
-    const currentFunc = core.LLVMGetBasicBlockParent(core.LLVMGetInsertBlock(builder));
+    // Stack-allocate size bytes
+    const buf = core.LLVMBuildArrayAlloca(builder, i8Type, sizeVal, "allocbuf");
 
-    // Allocate mutable variables on stack
-    const posPtr = core.LLVMBuildAlloca(builder, i32Type, "pos");
-    _ = core.LLVMBuildStore(builder, core.LLVMConstInt(i32Type, 20, 0), posPtr);
-    const valPtr = core.LLVMBuildAlloca(builder, i32Type, "val");
-    const isNegPtr = core.LLVMBuildAlloca(builder, core.LLVMInt1Type(), "isneg");
+    // Convert pointer to i64
+    const addr = core.LLVMBuildPtrToInt(builder, buf, i64Type, "bufaddr");
 
-    // Check if negative
-    const isNeg = core.LLVMBuildICmp(builder, .LLVMIntSLT, numVal, core.LLVMConstInt(i32Type, 0, 0), "isneg");
-    _ = core.LLVMBuildStore(builder, isNeg, isNegPtr);
+    // Store result as i64
+    const ptr = core.LLVMBuildAlloca(builder, i64Type, "allocres");
+    _ = core.LLVMBuildStore(builder, addr, ptr);
+    try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = i64Type });
 
-    // abs_n = is_neg ? 0 - n : n
-    const negVal = core.LLVMBuildNeg(builder, numVal, "neg");
-    const absVal = core.LLVMBuildSelect(builder, isNeg, negVal, numVal, "abs");
-    _ = core.LLVMBuildStore(builder, absVal, valPtr);
+    _ = i32Type;
+}
 
-    // Create all basic blocks upfront
-    const loopCond = core.LLVMAppendBasicBlock(currentFunc, "itoa.cond");
-    const loopBody = core.LLVMAppendBasicBlock(currentFunc, "itoa.body");
-    const zeroCheck = core.LLVMAppendBasicBlock(currentFunc, "itoa.zero");
-    const zeroBody = core.LLVMAppendBasicBlock(currentFunc, "itoa.writezero");
-    const negCheck = core.LLVMAppendBasicBlock(currentFunc, "itoa.neg");
-    const negBody = core.LLVMAppendBasicBlock(currentFunc, "itoa.writeneg");
-    const writeBlock = core.LLVMAppendBasicBlock(currentFunc, "itoa.write");
+fn generateWriteByte(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    call: ir.ZSIRCall,
+) !void {
+    if (call.argNames.len != 2) return;
 
-    _ = core.LLVMBuildBr(builder, loopCond);
+    const i64Type = core.LLVMInt64Type();
+    const i8Type = core.LLVMInt8Type();
 
-    // --- loopCond ---
-    core.LLVMPositionBuilderAtEnd(builder, loopCond);
-    const curVal = core.LLVMBuildLoad2(builder, i32Type, valPtr, "curval");
-    const gtZero = core.LLVMBuildICmp(builder, .LLVMIntSGT, curVal, core.LLVMConstInt(i32Type, 0, 0), "gtzero");
-    _ = core.LLVMBuildCondBr(builder, gtZero, loopBody, zeroCheck);
+    // Load addr argument
+    var addrVal: types.LLVMValueRef = undefined;
+    if (locals.get(call.argNames[0])) |local| {
+        addrVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "wbaddr");
+        // If it's i32, extend to i64
+        if (core.LLVMGetTypeKind(local.ty) == .LLVMIntegerTypeKind and
+            core.LLVMGetIntTypeWidth(local.ty) != 64)
+        {
+            addrVal = core.LLVMBuildSExt(builder, addrVal, i64Type, "wbaddr64");
+        }
+    } else {
+        return;
+    }
 
-    // --- loopBody ---
-    core.LLVMPositionBuilderAtEnd(builder, loopBody);
-    const val2 = core.LLVMBuildLoad2(builder, i32Type, valPtr, "val2");
-    const digit = core.LLVMBuildSRem(builder, val2, core.LLVMConstInt(i32Type, 10, 0), "digit");
-    const pos2 = core.LLVMBuildLoad2(builder, i32Type, posPtr, "pos2");
-    const newPos = core.LLVMBuildSub(builder, pos2, core.LLVMConstInt(i32Type, 1, 0), "newpos");
-    _ = core.LLVMBuildStore(builder, newPos, posPtr);
-    const charVal = core.LLVMBuildAdd(builder, digit, core.LLVMConstInt(i32Type, 48, 0), "charval");
-    const charByte = core.LLVMBuildTrunc(builder, charVal, i8Type, "charbyte");
-    const bufIdx = core.LLVMBuildGEP2(builder, i8Type, buf, @constCast(&[_]types.LLVMValueRef{newPos}), 1, "bufidx");
-    _ = core.LLVMBuildStore(builder, charByte, bufIdx);
-    const newVal = core.LLVMBuildSDiv(builder, val2, core.LLVMConstInt(i32Type, 10, 0), "newval");
-    _ = core.LLVMBuildStore(builder, newVal, valPtr);
-    _ = core.LLVMBuildBr(builder, loopCond);
+    // Load byte argument
+    var byteVal: types.LLVMValueRef = undefined;
+    if (locals.get(call.argNames[1])) |local| {
+        byteVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "wbbyte");
+    } else {
+        return;
+    }
 
-    // --- zeroCheck ---
-    core.LLVMPositionBuilderAtEnd(builder, zeroCheck);
-    const wasZero = core.LLVMBuildICmp(builder, .LLVMIntEQ, absVal, core.LLVMConstInt(i32Type, 0, 0), "waszero");
-    _ = core.LLVMBuildCondBr(builder, wasZero, zeroBody, negCheck);
+    // Convert addr (i64) to i8*
+    const addrPtr = core.LLVMBuildIntToPtr(builder, addrVal, core.LLVMPointerType(i8Type, 0), "wbptr");
 
-    // --- zeroBody ---
-    core.LLVMPositionBuilderAtEnd(builder, zeroBody);
-    const posZ = core.LLVMBuildLoad2(builder, i32Type, posPtr, "posz");
-    const newPosZ = core.LLVMBuildSub(builder, posZ, core.LLVMConstInt(i32Type, 1, 0), "newposz");
-    _ = core.LLVMBuildStore(builder, newPosZ, posPtr);
-    const bufIdxZ = core.LLVMBuildGEP2(builder, i8Type, buf, @constCast(&[_]types.LLVMValueRef{newPosZ}), 1, "bufidxz");
-    _ = core.LLVMBuildStore(builder, core.LLVMConstInt(i8Type, 48, 0), bufIdxZ);
-    _ = core.LLVMBuildBr(builder, negCheck);
+    // Truncate byte value to i8
+    const byteTrunc = core.LLVMBuildTrunc(builder, byteVal, i8Type, "wbbyte8");
 
-    // --- negCheck ---
-    core.LLVMPositionBuilderAtEnd(builder, negCheck);
-    const isNeg2 = core.LLVMBuildLoad2(builder, core.LLVMInt1Type(), isNegPtr, "isneg2");
-    _ = core.LLVMBuildCondBr(builder, isNeg2, negBody, writeBlock);
-
-    // --- negBody ---
-    core.LLVMPositionBuilderAtEnd(builder, negBody);
-    const posN = core.LLVMBuildLoad2(builder, i32Type, posPtr, "posn");
-    const newPosN = core.LLVMBuildSub(builder, posN, core.LLVMConstInt(i32Type, 1, 0), "newposn");
-    _ = core.LLVMBuildStore(builder, newPosN, posPtr);
-    const bufIdxN = core.LLVMBuildGEP2(builder, i8Type, buf, @constCast(&[_]types.LLVMValueRef{newPosN}), 1, "bufidxn");
-    _ = core.LLVMBuildStore(builder, core.LLVMConstInt(i8Type, 45, 0), bufIdxN);
-    _ = core.LLVMBuildBr(builder, writeBlock);
-
-    // --- writeBlock: syscall write ---
-    core.LLVMPositionBuilderAtEnd(builder, writeBlock);
-    const finalPos = core.LLVMBuildLoad2(builder, i32Type, posPtr, "finalpos");
-    const bufStart = core.LLVMBuildGEP2(builder, i8Type, buf, @constCast(&[_]types.LLVMValueRef{finalPos}), 1, "bufstart");
-    const writeLen = core.LLVMBuildSub(builder, core.LLVMConstInt(i32Type, 20, 0), finalPos, "writelen");
-
-    const bufStartInt = core.LLVMBuildPtrToInt(builder, bufStart, i64Type, "bufstartint");
-    const writeLenExt = core.LLVMBuildSExt(builder, writeLen, i64Type, "writelen64");
-
-    var sysParams: [4]types.LLVMTypeRef = .{ i64Type, i64Type, i64Type, i64Type };
-    const sysFnType = core.LLVMFunctionType(i64Type, &sysParams, 4, 0);
-    const sysAsm = core.LLVMGetInlineAsm(
-        sysFnType,
-        @constCast("syscall"),
-        7,
-        @constCast("={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}"),
-        56,
-        1,
-        0,
-        .LVMInlineAsmDialectATT,
-        0,
-    );
-
-    var writeArgs: [4]types.LLVMValueRef = .{
-        core.LLVMConstInt(i64Type, 1, 0),
-        core.LLVMConstInt(i64Type, 1, 0),
-        bufStartInt,
-        writeLenExt,
-    };
-    _ = core.LLVMBuildCall2(builder, sysFnType, sysAsm, &writeArgs, 4, "");
-
-    // Write newline
-    const nlBuf = core.LLVMBuildAlloca(builder, i8Type, "nl");
-    _ = core.LLVMBuildStore(builder, core.LLVMConstInt(i8Type, 10, 0), nlBuf);
-    const nlPtr = core.LLVMBuildPtrToInt(builder, nlBuf, i64Type, "nlptr");
-    var nlArgs: [4]types.LLVMValueRef = .{
-        core.LLVMConstInt(i64Type, 1, 0),
-        core.LLVMConstInt(i64Type, 1, 0),
-        nlPtr,
-        core.LLVMConstInt(i64Type, 1, 0),
-    };
-    _ = core.LLVMBuildCall2(builder, sysFnType, sysAsm, &nlArgs, 4, "");
+    // Store byte at address
+    _ = core.LLVMBuildStore(builder, byteTrunc, addrPtr);
 }
 
 fn generateReadLine(
@@ -996,14 +982,18 @@ fn mapType(name: []const u8) types.LLVMTypeRef {
         return core.LLVMInt32Type();
     } else if (std.mem.eql(u8, name, "boolean")) {
         return core.LLVMInt1Type();
-    } else if (std.mem.eql(u8, name, "string")) {
+    } else if (std.mem.eql(u8, name, "String")) {
         return getStringType();
     } else if (std.mem.eql(u8, name, "c_string")) {
+        return core.LLVMPointerType(core.LLVMInt8Type(), 0);
+    } else if (std.mem.eql(u8, name, "pointer")) {
+        // Generic pointer type (opaque ptr)
         return core.LLVMPointerType(core.LLVMInt8Type(), 0);
     } else if (std.mem.eql(u8, name, "void")) {
         return core.LLVMVoidType();
     } else {
-        return core.LLVMVoidType();
+        // Unknown type (including struct names) — use opaque pointer as placeholder
+        return core.LLVMPointerType(core.LLVMInt8Type(), 0);
     }
 }
 

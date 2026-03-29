@@ -13,6 +13,8 @@ const ZSExprType = enum {
     binary,
     block,
     return_expr,
+    struct_init,
+    field_access,
 };
 
 pub const ZSExpr = union(ZSExprType) {
@@ -26,6 +28,8 @@ pub const ZSExpr = union(ZSExprType) {
     binary: ZSBinary,
     block: ZSBlock,
     return_expr: ZSReturn,
+    struct_init: ZSStructInit,
+    field_access: ZSFieldAccess,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -36,6 +40,8 @@ pub const ZSExpr = union(ZSExprType) {
             .binary => self.binary.deinit(allocator),
             .block => self.block.deinit(allocator),
             .return_expr => self.return_expr.deinit(allocator),
+            .struct_init => self.struct_init.deinit(allocator),
+            .field_access => self.field_access.deinit(allocator),
             .number, .boolean, .reference => {},
         }
     }
@@ -52,6 +58,8 @@ pub const ZSExpr = union(ZSExprType) {
             .binary => self.binary.startPos,
             .block => self.block.startPos,
             .return_expr => self.return_expr.startPos,
+            .struct_init => self.struct_init.startPos,
+            .field_access => self.field_access.startPos,
         };
     }
 
@@ -67,6 +75,8 @@ pub const ZSExpr = union(ZSExprType) {
             .binary => self.binary.endPos,
             .block => self.block.endPos,
             .return_expr => self.return_expr.endPos,
+            .struct_init => self.struct_init.endPos,
+            .field_access => self.field_access.endPos,
         };
     }
 };
@@ -167,5 +177,36 @@ pub const ZSReturn = struct {
             v.deinit(allocator);
             allocator.destroy(v);
         }
+    }
+};
+
+pub const ZSFieldInit = struct {
+    name: []const u8,
+    value: ZSExpr,
+};
+
+pub const ZSStructInit = struct {
+    name: []const u8,
+    field_values: []ZSFieldInit,
+    startPos: usize,
+    endPos: usize,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        for (self.field_values) |*fv| {
+            fv.value.deinit(allocator);
+        }
+        allocator.free(self.field_values);
+    }
+};
+
+pub const ZSFieldAccess = struct {
+    subject: *ZSExpr,
+    field: []const u8,
+    startPos: usize,
+    endPos: usize,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        self.subject.deinit(allocator);
+        allocator.destroy(self.subject);
     }
 };
