@@ -6,7 +6,7 @@ export fn print(s: String): void {
 }
 
 export fn print_number(n: number): void {
-  let buf = ['\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0']
+  let buf = ['\0'; 20]
   let pos = 19
   let is_neg = 0
   let val = n
@@ -40,4 +40,14 @@ export fn print_number(n: number): void {
 }
 
 export fn print(n: number): void = print_number(n)
-export fn read_line(): String = __read_line()
+
+export fn read_line(): String {
+  let buf = ['\0'; 1024]
+  let bytes = __syscall3(0, 0, ptr(buf), 1024)
+  if (bytes > 0) {
+    if (buf[bytes - 1] == 10) {
+      bytes = bytes - 1
+    }
+  }
+  return String { len: bytes, data: ptr(buf) }
+}

@@ -187,8 +187,6 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
 
     // Register intrinsics
     try analyzer.registerIntrinsic(allocator, "__syscall3", &.{ "number", "number", "number", "number" }, .number);
-    try analyzer.registerIntrinsic(allocator, "__read_line", &.{}, getStringStructTypeStatic());
-
     // Inject prelude exports into scope
     if (preludeExports) |exports| {
         var iter = exports.iterator();
@@ -316,7 +314,7 @@ fn registerFunction(self: *Self, func: ast.stmt.ZSFn) !void {
         break :blk name;
     };
 
-    const retType = resolveTypeAnnotation(func.ret);
+    const retType = if (func.ret) |r| try self.resolveTypeAnnotationFull(r) else Symbol.ZSType.unknown;
 
     // Check for duplicate signatures
     if (self.overloads.getPtr(func.name)) |entries| {

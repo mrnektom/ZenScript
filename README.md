@@ -99,6 +99,10 @@ arr[1] = 42              // indexed assignment (let only)
 let len = arr.length     // array length
 
 let chars = ['h', 'i']   // array of char
+
+// Repeat syntax: [value; count]
+let zeros = ['\0'; 128]  // 128 null bytes
+let ones = [1; 10]       // 10 elements, all 1
 ```
 
 Arrays are fixed-size and stack-allocated (`alloca [N x T]` in LLVM). Array type annotation: `[number]`, `[char]`.
@@ -194,7 +198,6 @@ The `stdlib/` directory is auto-imported as a prelude. It provides:
 
 Low-level intrinsics available for systems programming:
 - `__syscall3(nr, arg1, arg2, arg3): number` — Linux syscall
-- `__read_line(): String` — read line from stdin
 
 ## Compilation pipeline
 

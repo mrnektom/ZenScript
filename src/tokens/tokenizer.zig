@@ -38,7 +38,7 @@ fn currentTokenType(self: *Tokenizer) Error!?TokenType {
     const firstChar = self.peek() orelse return null;
     return switch (firstChar) {
         '=', '!' => .punctuation,
-        '(', ')', ':', '{', '}', ',', '.' => .punctuation,
+        '(', ')', ':', '{', '}', ',', '.', ';' => .punctuation,
         '[', ']' => .punctuation,
         '+', '-', '*', '/', '%', '>', '<' => .punctuation,
         '"' => .string,
@@ -144,7 +144,7 @@ fn eatPunc(self: *Tokenizer) void {
             self.shift();
             if (self.peek() == @as(u8, '=')) self.shift();
         },
-        '(', ')', ':', '{', '}', ',', '.', '+', '-', '*', '/', '%', '[', ']' => self.shift(),
+        '(', ')', ':', '{', '}', ',', '.', ';', '+', '-', '*', '/', '%', '[', ']' => self.shift(),
 
         else => {},
     }

@@ -54,6 +54,19 @@ pub const ZSExpr = union(ZSExprType) {
         }
     }
 
+    pub const CloneError = error{UnsupportedClone} || std.mem.Allocator.Error;
+
+    pub fn clone(self: ZSExpr, allocator: std.mem.Allocator) CloneError!ZSExpr {
+        return switch (self) {
+            .number, .char, .boolean, .reference => self,
+            .string => |s| {
+                const duped = try allocator.dupeZ(u8, s.value);
+                return ZSExpr{ .string = .{ .value = duped, .startPos = s.startPos, .endPos = s.endPos } };
+            },
+            else => CloneError.UnsupportedClone,
+        };
+    }
+
     pub fn start(self: *const @This()) usize {
         return switch (self.*) {
             .number => self.number.startPos,

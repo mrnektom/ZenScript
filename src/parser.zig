@@ -14,7 +14,7 @@ allocator: std.mem.Allocator,
 filename: []const u8,
 source: []const u8,
 
-const Error = error{ UnexpectedTokenType, UnexpectedToken, NotShiftedToken } || Tokenizer.Error || std.mem.Allocator.Error;
+const Error = error{ UnexpectedTokenType, UnexpectedToken, NotShiftedToken, UnsupportedClone } || Tokenizer.Error || std.mem.Allocator.Error;
 
 pub fn create(
     allocator: std.mem.Allocator,
@@ -95,7 +95,7 @@ fn nextNode(self: *Self) !?ZSAstNode {
     };
     if (s) |stmt| {
         return ZSAstNode{ .stmt = stmt };
-    } else return Error.UnknownToken;
+    } else return null;
 }
 
 fn nextImport(self: *Self) Error!?ast.ZSImport {
@@ -472,15 +472,32 @@ fn nextArrayLiteral(self: *Self) Error!?ast.expr.ZSArrayLiteral {
     var elements = try std.ArrayList(ast.expr.ZSExpr).initCapacity(self.allocator, 4);
     defer elements.deinit(self.allocator);
 
-    while (true) {
-        if (self.checkToken("]")) break;
-        const elem = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
-        try elements.append(self.allocator, elem);
-        if (self.checkToken(",")) {
+    // Parse first element
+    if (!self.checkToken("]")) {
+        const firstElem = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+        try elements.append(self.allocator, firstElem);
+
+        // Check for [value; count] repeat syntax
+        if (self.checkToken(";")) {
+            self.shiftToken(); // consume ';'
+            const countToken = try self.peekToken();
+            if (countToken.type != .numeric) return Error.UnexpectedTokenType;
             self.shiftToken();
-            continue;
+            const count = std.fmt.parseInt(usize, countToken.value, 10) catch return Error.UnexpectedToken;
+            // Already have 1 element, duplicate count-1 more times
+            var i: usize = 1;
+            while (i < count) : (i += 1) {
+                try elements.append(self.allocator, try firstElem.clone(self.allocator));
+            }
+        } else {
+            // Normal comma-separated list
+            while (self.checkToken(",")) {
+                self.shiftToken();
+                if (self.checkToken("]")) break;
+                const elem = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+                try elements.append(self.allocator, elem);
+            }
         }
-        break;
     }
 
     const endToken = try self.peekToken();
