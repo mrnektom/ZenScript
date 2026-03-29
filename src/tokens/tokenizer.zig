@@ -41,6 +41,7 @@ fn currentTokenType(self: *Tokenizer) Error!?TokenType {
         '(', ')', ':', '{', '}', ',', '.', ';' => .punctuation,
         '[', ']' => .punctuation,
         '+', '-', '*', '/', '%', '>', '<' => .punctuation,
+        '&', '|' => .punctuation,
         '"' => .string,
         '\'' => .char_literal,
         else => e: {
@@ -147,6 +148,14 @@ fn eatPunc(self: *Tokenizer) void {
         '-' => {
             self.shift();
             if (self.peek() == @as(u8, '>')) self.shift();
+        },
+        '&' => {
+            self.shift();
+            if (self.peek() == @as(u8, '&')) self.shift();
+        },
+        '|' => {
+            self.shift();
+            if (self.peek() == @as(u8, '|')) self.shift();
         },
         '(', ')', ':', '{', '}', ',', '.', ';', '+', '*', '/', '%', '[', ']' => self.shift(),
 

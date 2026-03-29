@@ -130,9 +130,13 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
         .reference => self.generateReference(expr.reference),
         .if_expr => self.generateIfExpr(expr.if_expr),
         .while_expr => self.generateWhileExpr(expr.while_expr),
+        .for_expr => self.generateForExpr(expr.for_expr),
         .binary => self.generateBinary(expr.binary),
+        .unary => self.generateUnary(expr.unary),
         .block => self.generateBlock(expr.block),
         .return_expr => self.generateReturn(expr.return_expr),
+        .break_expr => self.generateBreak(),
+        .continue_expr => self.generateContinue(),
         .struct_init => self.generateStructInit(expr.struct_init),
         .field_access => self.generateFieldAccess(expr.field_access),
         .array_literal => self.generateArrayLiteral(expr.array_literal),
@@ -383,10 +387,19 @@ fn generateIfExpr(self: *Self, ifExpr: ast.expr.ZSIfExpr) Error![]const u8 {
 }
 
 fn generateBinary(self: *Self, binary: ast.expr.ZSBinary) Error![]const u8 {
+    const op = binary.op;
+
+    // Short-circuit logical operators: desugar to branch
+    if (std.mem.eql(u8, op, "&&")) {
+        return self.generateLogicalAnd(binary);
+    }
+    if (std.mem.eql(u8, op, "||")) {
+        return self.generateLogicalOr(binary);
+    }
+
     const lhsName = try self.generateExpr(binary.lhs.*);
     const rhsName = try self.generateExpr(binary.rhs.*);
     const resultName = try self.generateName();
-    const op = binary.op;
 
     const isCompare = std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=") or
         std.mem.eql(u8, op, ">") or std.mem.eql(u8, op, "<") or
@@ -420,6 +433,78 @@ fn generateBinary(self: *Self, binary: ast.expr.ZSBinary) Error![]const u8 {
     return resultName;
 }
 
+// a && b: if a then b else false
+fn generateLogicalAnd(self: *Self, binary: ast.expr.ZSBinary) Error![]const u8 {
+    const condName = try self.generateExpr(binary.lhs.*);
+
+    // Then body: evaluate rhs
+    var thenInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
+    defer thenInstructions.deinit(self.allocator);
+    const outerInstructions = self.instructions;
+    self.instructions = &thenInstructions;
+    const thenResult = try self.generateExpr(binary.rhs.*);
+    self.instructions = outerInstructions;
+
+    // Else body: produce false
+    var elseInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 1);
+    defer elseInstructions.deinit(self.allocator);
+    self.instructions = &elseInstructions;
+    const elseResult = try self.generateBooleanAssign(.{ .value = false, .startPos = 0, .endPos = 0 });
+    self.instructions = outerInstructions;
+
+    const resultName = try self.generateName();
+    try self.instructions.append(
+        self.allocator,
+        ir.ZSIR{
+            .branch = ir.ZSIRBranch{
+                .condition = condName,
+                .thenBody = try self.allocator.dupe(ir.ZSIR, thenInstructions.items),
+                .elseBody = try self.allocator.dupe(ir.ZSIR, elseInstructions.items),
+                .resultName = resultName,
+                .thenResult = thenResult,
+                .elseResult = elseResult,
+            },
+        },
+    );
+    return resultName;
+}
+
+// a || b: if a then true else b
+fn generateLogicalOr(self: *Self, binary: ast.expr.ZSBinary) Error![]const u8 {
+    const condName = try self.generateExpr(binary.lhs.*);
+
+    // Then body: produce true
+    var thenInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 1);
+    defer thenInstructions.deinit(self.allocator);
+    const outerInstructions = self.instructions;
+    self.instructions = &thenInstructions;
+    const thenResult = try self.generateBooleanAssign(.{ .value = true, .startPos = 0, .endPos = 0 });
+    self.instructions = outerInstructions;
+
+    // Else body: evaluate rhs
+    var elseInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
+    defer elseInstructions.deinit(self.allocator);
+    self.instructions = &elseInstructions;
+    const elseResult = try self.generateExpr(binary.rhs.*);
+    self.instructions = outerInstructions;
+
+    const resultName = try self.generateName();
+    try self.instructions.append(
+        self.allocator,
+        ir.ZSIR{
+            .branch = ir.ZSIRBranch{
+                .condition = condName,
+                .thenBody = try self.allocator.dupe(ir.ZSIR, thenInstructions.items),
+                .elseBody = try self.allocator.dupe(ir.ZSIR, elseInstructions.items),
+                .resultName = resultName,
+                .thenResult = thenResult,
+                .elseResult = elseResult,
+            },
+        },
+    );
+    return resultName;
+}
+
 fn generateWhileExpr(self: *Self, whileExpr: ast.expr.ZSWhileExpr) Error![]const u8 {
     // Generate condition instructions into a separate list
     var condInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
@@ -447,6 +532,71 @@ fn generateWhileExpr(self: *Self, whileExpr: ast.expr.ZSWhileExpr) Error![]const
         },
     );
     return "";
+}
+
+fn generateForExpr(self: *Self, forExpr: ast.expr.ZSForExpr) Error![]const u8 {
+    // Generate init statement (e.g. let i = 0) into current instructions
+    _ = try self.generateNode(forExpr.init.*);
+
+    // Generate condition instructions into a separate list
+    var condInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
+    defer condInstructions.deinit(self.allocator);
+    const outerInstructions = self.instructions;
+    self.instructions = &condInstructions;
+    const condName = try self.generateExpr(forExpr.condition.*);
+    self.instructions = outerInstructions;
+
+    // Generate body instructions
+    var bodyInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 8);
+    defer bodyInstructions.deinit(self.allocator);
+    self.instructions = &bodyInstructions;
+    _ = try self.generateExpr(forExpr.body.*);
+    self.instructions = outerInstructions;
+
+    // Generate step instructions separately (for correct continue behavior)
+    var stepInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
+    defer stepInstructions.deinit(self.allocator);
+    self.instructions = &stepInstructions;
+    _ = try self.generateNode(forExpr.step.*);
+    self.instructions = outerInstructions;
+
+    try self.instructions.append(
+        self.allocator,
+        ir.ZSIR{
+            .loop = ir.ZSIRLoop{
+                .condition = try self.allocator.dupe(ir.ZSIR, condInstructions.items),
+                .conditionName = condName,
+                .body = try self.allocator.dupe(ir.ZSIR, bodyInstructions.items),
+                .step = try self.allocator.dupe(ir.ZSIR, stepInstructions.items),
+            },
+        },
+    );
+    return "";
+}
+
+fn generateBreak(self: *Self) Error![]const u8 {
+    try self.instructions.append(self.allocator, ir.ZSIR{ .break_stmt = .{} });
+    return "";
+}
+
+fn generateContinue(self: *Self) Error![]const u8 {
+    try self.instructions.append(self.allocator, ir.ZSIR{ .continue_stmt = .{} });
+    return "";
+}
+
+fn generateUnary(self: *Self, unary: ast.expr.ZSUnary) Error![]const u8 {
+    const operandName = try self.generateExpr(unary.operand.*);
+    const resultName = try self.generateName();
+    try self.instructions.append(
+        self.allocator,
+        ir.ZSIR{
+            .not_op = ir.ZSIRNot{
+                .resultName = resultName,
+                .operand = operandName,
+            },
+        },
+    );
+    return resultName;
 }
 
 fn generateBlock(self: *Self, block: ast.expr.ZSBlock) Error![]const u8 {

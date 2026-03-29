@@ -11,6 +11,11 @@ const LocalVar = struct {
     ty: types.LLVMTypeRef,
 };
 
+const LoopContext = struct {
+    condBlock: types.LLVMBasicBlockRef,
+    afterBlock: types.LLVMBasicBlockRef,
+};
+
 pub fn generate() void {
     _ = target.LLVMInitializeNativeTarget();
     _ = target.LLVMInitializeNativeAsmPrinter();
@@ -79,7 +84,7 @@ pub fn generateLLVMModule(
     defer locals.deinit();
 
     for (instructions.instructions) |instruction| {
-        try generateInstruction(builder, module, &locals, &instruction, allocator);
+        try generateInstruction(builder, module, &locals, &instruction, allocator, null);
     }
 
     _ = core.LLVMBuildRet(builder, null);
@@ -93,6 +98,7 @@ fn generateInstruction(
     locals: *std.StringHashMap(LocalVar),
     instruction: *const ir.ZSIR,
     allocator: std.mem.Allocator,
+    loopCtx: ?LoopContext,
 ) std.mem.Allocator.Error!void {
     switch (instruction.*) {
         .assign => try generateAssign(builder, locals, instruction.assign),
@@ -101,22 +107,32 @@ fn generateInstruction(
         .fn_decl => try generateFnDecl(module, instruction.fn_decl, allocator),
         .fn_def => try generateFnDef(builder, module, instruction.fn_def, allocator),
         .ret => generateRet(builder, locals, instruction.ret),
-        .branch => try generateBranch(builder, module, locals, instruction.branch, allocator),
+        .branch => try generateBranch(builder, module, locals, instruction.branch, allocator, loopCtx),
         .compare => try generateCompare(builder, locals, instruction.compare, allocator),
         .arith => try generateArith(builder, locals, instruction.arith, allocator),
-        .loop => try generateLoop(builder, module, locals, instruction.loop, allocator),
+        .loop => try generateLoop(builder, module, locals, instruction.loop, allocator, loopCtx),
         .module_init => try generateModuleInit(builder, module, instruction.module_init, allocator),
         .array_init => try generateArrayInit(builder, locals, instruction.array_init),
         .index_access => try generateIndexAccess(builder, locals, instruction.index_access),
         .index_store => generateIndexStore(builder, locals, instruction.index_store),
-        // Struct/pointer instructions — stubs for future implementation
         .struct_init => try generateStructInit(builder, locals, instruction.struct_init),
         .field_access => try generateFieldAccess(builder, locals, instruction.field_access),
         .ptr_op => try generatePtrOp(builder, locals, instruction.ptr_op),
         .deref_op => try generateDerefOp(builder, locals, instruction.deref_op),
         .enum_decl => try generateEnumDeclCodegen(module, instruction.enum_decl, allocator),
         .enum_init => try generateEnumInitCodegen(builder, module, locals, instruction.enum_init, allocator),
-        .match_expr => try generateMatchCodegen(builder, module, locals, instruction.match_expr, allocator),
+        .match_expr => try generateMatchCodegen(builder, module, locals, instruction.match_expr, allocator, loopCtx),
+        .break_stmt => {
+            if (loopCtx) |ctx| {
+                _ = core.LLVMBuildBr(builder, ctx.afterBlock);
+            }
+        },
+        .continue_stmt => {
+            if (loopCtx) |ctx| {
+                _ = core.LLVMBuildBr(builder, ctx.condBlock);
+            }
+        },
+        .not_op => try generateNot(builder, locals, instruction.not_op),
     }
 }
 
@@ -247,7 +263,7 @@ fn generateFnDef(
 
     // Generate body instructions
     for (def.body) |inst| {
-        try generateInstruction(builder, module, &fnLocals, &inst, allocator);
+        try generateInstruction(builder, module, &fnLocals, &inst, allocator, null);
     }
 
     // Add implicit return void if the function returns void and last instruction isn't a terminator
@@ -289,6 +305,7 @@ fn generateBranch(
     locals: *std.StringHashMap(LocalVar),
     branch: ir.ZSIRBranch,
     allocator: std.mem.Allocator,
+    loopCtx: ?LoopContext,
 ) !void {
     // Load the condition value
     var condVal: types.LLVMValueRef = undefined;
@@ -325,7 +342,7 @@ fn generateBranch(
     // Then block
     core.LLVMPositionBuilderAtEnd(builder, thenBlock);
     for (branch.thenBody) |inst| {
-        try generateInstruction(builder, module, locals, &inst, allocator);
+        try generateInstruction(builder, module, locals, &inst, allocator, loopCtx);
     }
     // Store then result if producing a value
     const thenTerm = core.LLVMGetBasicBlockTerminator(core.LLVMGetInsertBlock(builder));
@@ -344,7 +361,7 @@ fn generateBranch(
     // Else block
     core.LLVMPositionBuilderAtEnd(builder, elseBlock);
     for (branch.elseBody) |inst| {
-        try generateInstruction(builder, module, locals, &inst, allocator);
+        try generateInstruction(builder, module, locals, &inst, allocator, loopCtx);
     }
     const elseTerm = core.LLVMGetBasicBlockTerminator(core.LLVMGetInsertBlock(builder));
     if (elseTerm == null) {
@@ -492,11 +509,20 @@ fn generateLoop(
     locals: *std.StringHashMap(LocalVar),
     loop: ir.ZSIRLoop,
     allocator: std.mem.Allocator,
+    _: ?LoopContext,
 ) !void {
     const currentFunc = core.LLVMGetBasicBlockParent(core.LLVMGetInsertBlock(builder));
     const condBlock = core.LLVMAppendBasicBlock(currentFunc, "while.cond");
     const bodyBlock = core.LLVMAppendBasicBlock(currentFunc, "while.body");
     const afterBlock = core.LLVMAppendBasicBlock(currentFunc, "while.after");
+
+    // For for-loops with a step, create a step block; continue jumps there
+    // For while-loops, continue jumps directly to condBlock
+    const hasStep = loop.step != null and loop.step.?.len > 0;
+    const stepBlock = if (hasStep) core.LLVMAppendBasicBlock(currentFunc, "for.step") else null;
+    const continueTarget = if (stepBlock) |sb| sb else condBlock;
+
+    const innerLoopCtx = LoopContext{ .condBlock = continueTarget, .afterBlock = afterBlock };
 
     // Branch to condition block
     _ = core.LLVMBuildBr(builder, condBlock);
@@ -504,7 +530,7 @@ fn generateLoop(
     // Condition block: evaluate condition
     core.LLVMPositionBuilderAtEnd(builder, condBlock);
     for (loop.condition) |inst| {
-        try generateInstruction(builder, module, locals, &inst, allocator);
+        try generateInstruction(builder, module, locals, &inst, allocator, innerLoopCtx);
     }
 
     // Load condition and compare != 0
@@ -531,11 +557,22 @@ fn generateLoop(
     // Body block
     core.LLVMPositionBuilderAtEnd(builder, bodyBlock);
     for (loop.body) |inst| {
-        try generateInstruction(builder, module, locals, &inst, allocator);
+        try generateInstruction(builder, module, locals, &inst, allocator, innerLoopCtx);
     }
-    // Check if body has a terminator (e.g., return), if not jump back to condition
+    // Check if body has a terminator (e.g., return, break, continue), if not fall through
     const bodyTerm = core.LLVMGetBasicBlockTerminator(core.LLVMGetInsertBlock(builder));
     if (bodyTerm == null) {
+        _ = core.LLVMBuildBr(builder, continueTarget);
+    }
+
+    // Step block (for for-loops)
+    if (stepBlock) |sb| {
+        core.LLVMPositionBuilderAtEnd(builder, sb);
+        if (loop.step) |step| {
+            for (step) |inst| {
+                try generateInstruction(builder, module, locals, &inst, allocator, innerLoopCtx);
+            }
+        }
         _ = core.LLVMBuildBr(builder, condBlock);
     }
 
@@ -985,6 +1022,28 @@ fn generateDerefOp(
     try locals.put(op.resultName, LocalVar{ .ptr = alloca, .ty = pointeeType });
 }
 
+fn generateNot(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    op: ir.ZSIRNot,
+) !void {
+    const operand = locals.get(op.operand) orelse return;
+    const val = core.LLVMBuildLoad2(builder, operand.ty, operand.ptr, "notval");
+
+    // Compare operand == 0 to invert boolean
+    const result = core.LLVMBuildICmp(
+        builder,
+        .LLVMIntEQ,
+        val,
+        core.LLVMConstInt(core.LLVMTypeOf(val), 0, 0),
+        "not",
+    );
+    const i1Type = core.LLVMInt1Type();
+    const ptr = core.LLVMBuildAlloca(builder, i1Type, "notres");
+    _ = core.LLVMBuildStore(builder, result, ptr);
+    try locals.put(op.resultName, LocalVar{ .ptr = ptr, .ty = i1Type });
+}
+
 fn generateArrayInit(
     builder: types.LLVMBuilderRef,
     locals: *std.StringHashMap(LocalVar),
@@ -1159,6 +1218,7 @@ fn generateMatchCodegen(
     locals: *std.StringHashMap(LocalVar),
     me: ir.ZSIRMatch,
     allocator: std.mem.Allocator,
+    loopCtx: ?LoopContext,
 ) !void {
     const subjectLocal = locals.get(me.subject) orelse return;
     const subjectVal = core.LLVMBuildLoad2(builder, subjectLocal.ty, subjectLocal.ptr, "matchsub");
@@ -1213,7 +1273,7 @@ fn generateMatchCodegen(
 
         // Execute arm body instructions
         for (arm.body) |bodyInst| {
-            try generateInstruction(builder, module, locals, &bodyInst, allocator);
+            try generateInstruction(builder, module, locals, &bodyInst, allocator, loopCtx);
         }
 
         // Get arm result

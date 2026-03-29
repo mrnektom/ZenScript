@@ -31,6 +31,7 @@ useAliases: std.StringHashMap(UseAlias),
 allocatedEnumVariants: std.ArrayList([]sig.ZSEnumVariant),
 enumInits: std.AutoHashMap(usize, EnumInitInfo),
 derefTypes: std.AutoHashMap(usize, []const u8),
+inLoop: bool,
 
 pub const EnumInitInfo = struct {
     enumName: []const u8,
@@ -204,6 +205,7 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .allocatedEnumVariants = try std.ArrayList([]sig.ZSEnumVariant).initCapacity(allocator, 4),
         .enumInits = std.AutoHashMap(usize, EnumInitInfo).init(allocator),
         .derefTypes = std.AutoHashMap(usize, []const u8).init(allocator),
+        .inLoop = false,
     };
 
     // Note: resolutions, overloadedNames, overloads, allocatedStrings, allocatedTypes,
@@ -576,9 +578,13 @@ fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) !Symbol.ZSType {
         .reference => self.analyzeReference(expr.reference),
         .if_expr => self.analyzeIfExpr(expr.if_expr),
         .while_expr => self.analyzeWhileExpr(expr.while_expr),
+        .for_expr => self.analyzeForExpr(expr.for_expr),
         .binary => self.analyzeBinary(expr.binary),
+        .unary => self.analyzeUnary(expr.unary),
         .block => self.analyzeBlock(expr.block),
         .return_expr => self.analyzeReturn(expr.return_expr),
+        .break_expr => self.analyzeBreak(expr.break_expr),
+        .continue_expr => self.analyzeContinue(expr.continue_expr),
         .struct_init => self.analyzeStructInit(expr.struct_init),
         .field_access => self.analyzeFieldAccess(expr.field_access),
         .array_literal => self.analyzeArrayLiteral(expr.array_literal),
@@ -809,18 +815,60 @@ fn analyzeIfExpr(self: *Self, ifExpr: ast.expr.ZSIfExpr) Error!Symbol.ZSType {
 
 fn analyzeWhileExpr(self: *Self, whileExpr: ast.expr.ZSWhileExpr) Error!Symbol.ZSType {
     _ = try self.analyzeExpr(whileExpr.condition.*);
+    const wasInLoop = self.inLoop;
+    self.inLoop = true;
     _ = try self.analyzeExpr(whileExpr.body.*);
+    self.inLoop = wasInLoop;
     return .unknown;
+}
+
+fn analyzeForExpr(self: *Self, forExpr: ast.expr.ZSForExpr) Error!Symbol.ZSType {
+    // Enter scope for the loop variable
+    var forScope = SymbolTable.init(self.allocator);
+    defer forScope.deinit();
+    try self.tableStack.enterScope(&forScope);
+    // Analyze init and register the variable
+    if (try self.analyzeNode(forExpr.init.*)) |symbol| {
+        try self.tableStack.put(symbol);
+    }
+    _ = try self.analyzeExpr(forExpr.condition.*);
+    const wasInLoop = self.inLoop;
+    self.inLoop = true;
+    _ = try self.analyzeExpr(forExpr.body.*);
+    self.inLoop = wasInLoop;
+    _ = try self.analyzeNode(forExpr.step.*);
+    _ = try self.tableStack.exitScope();
+    return .unknown;
+}
+
+fn analyzeBreak(self: *Self, breakExpr: ast.expr.ZSBreak) Error!Symbol.ZSType {
+    if (!self.inLoop) {
+        try self.recordError(breakExpr, "break can only be used inside a loop");
+    }
+    return .unknown;
+}
+
+fn analyzeContinue(self: *Self, continueExpr: ast.expr.ZSContinue) Error!Symbol.ZSType {
+    if (!self.inLoop) {
+        try self.recordError(continueExpr, "continue can only be used inside a loop");
+    }
+    return .unknown;
+}
+
+fn analyzeUnary(self: *Self, unary: ast.expr.ZSUnary) Error!Symbol.ZSType {
+    _ = try self.analyzeExpr(unary.operand.*);
+    return Symbol.ZSType.boolean;
 }
 
 fn analyzeBinary(self: *Self, binary: ast.expr.ZSBinary) Error!Symbol.ZSType {
     _ = try self.analyzeExpr(binary.lhs.*);
     _ = try self.analyzeExpr(binary.rhs.*);
     const op = binary.op;
-    // Comparison operators return boolean
+    // Comparison and logical operators return boolean
     if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=") or
         std.mem.eql(u8, op, ">") or std.mem.eql(u8, op, "<") or
-        std.mem.eql(u8, op, ">=") or std.mem.eql(u8, op, "<="))
+        std.mem.eql(u8, op, ">=") or std.mem.eql(u8, op, "<=") or
+        std.mem.eql(u8, op, "&&") or std.mem.eql(u8, op, "||"))
     {
         return Symbol.ZSType.boolean;
     }

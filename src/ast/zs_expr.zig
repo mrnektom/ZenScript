@@ -11,9 +11,13 @@ const ZSExprType = enum {
     reference,
     if_expr,
     while_expr,
+    for_expr,
     binary,
+    unary,
     block,
     return_expr,
+    break_expr,
+    continue_expr,
     struct_init,
     field_access,
     array_literal,
@@ -31,9 +35,13 @@ pub const ZSExpr = union(ZSExprType) {
     reference: ZSReference,
     if_expr: ZSIfExpr,
     while_expr: ZSWhileExpr,
+    for_expr: ZSForExpr,
     binary: ZSBinary,
+    unary: ZSUnary,
     block: ZSBlock,
     return_expr: ZSReturn,
+    break_expr: ZSBreak,
+    continue_expr: ZSContinue,
     struct_init: ZSStructInit,
     field_access: ZSFieldAccess,
     array_literal: ZSArrayLiteral,
@@ -47,7 +55,9 @@ pub const ZSExpr = union(ZSExprType) {
             .string => self.string.deinit(allocator),
             .if_expr => self.if_expr.deinit(allocator),
             .while_expr => self.while_expr.deinit(allocator),
+            .for_expr => self.for_expr.deinit(allocator),
             .binary => self.binary.deinit(allocator),
+            .unary => self.unary.deinit(allocator),
             .block => self.block.deinit(allocator),
             .return_expr => self.return_expr.deinit(allocator),
             .struct_init => self.struct_init.deinit(allocator),
@@ -56,7 +66,7 @@ pub const ZSExpr = union(ZSExprType) {
             .index_access => self.index_access.deinit(allocator),
             .enum_init => self.enum_init.deinit(allocator),
             .match_expr => self.match_expr.deinit(allocator),
-            .number, .char, .boolean, .reference => {},
+            .number, .char, .boolean, .reference, .break_expr, .continue_expr => {},
         }
     }
 
@@ -64,7 +74,7 @@ pub const ZSExpr = union(ZSExprType) {
 
     pub fn clone(self: ZSExpr, allocator: std.mem.Allocator) CloneError!ZSExpr {
         return switch (self) {
-            .number, .char, .boolean, .reference => self,
+            .number, .char, .boolean, .reference, .break_expr, .continue_expr => self,
             .string => |s| {
                 const duped = try allocator.dupeZ(u8, s.value);
                 return ZSExpr{ .string = .{ .value = duped, .startPos = s.startPos, .endPos = s.endPos } };
@@ -83,9 +93,13 @@ pub const ZSExpr = union(ZSExprType) {
             .reference => self.reference.startPos,
             .if_expr => self.if_expr.startPos,
             .while_expr => self.while_expr.startPos,
+            .for_expr => self.for_expr.startPos,
             .binary => self.binary.startPos,
+            .unary => self.unary.startPos,
             .block => self.block.startPos,
             .return_expr => self.return_expr.startPos,
+            .break_expr => self.break_expr.startPos,
+            .continue_expr => self.continue_expr.startPos,
             .struct_init => self.struct_init.startPos,
             .field_access => self.field_access.startPos,
             .array_literal => self.array_literal.startPos,
@@ -105,9 +119,13 @@ pub const ZSExpr = union(ZSExprType) {
             .reference => self.reference.endPos,
             .if_expr => self.if_expr.endPos,
             .while_expr => self.while_expr.endPos,
+            .for_expr => self.for_expr.endPos,
             .binary => self.binary.endPos,
+            .unary => self.unary.endPos,
             .block => self.block.endPos,
             .return_expr => self.return_expr.endPos,
+            .break_expr => self.break_expr.endPos,
+            .continue_expr => self.continue_expr.endPos,
             .struct_init => self.struct_init.endPos,
             .field_access => self.field_access.endPos,
             .array_literal => self.array_literal.endPos,
@@ -317,5 +335,47 @@ pub const ZSMatchExpr = struct {
             allocator.destroy(arm.body);
         }
         allocator.free(self.arms);
+    }
+};
+
+pub const ZSBreak = struct {
+    startPos: usize,
+    endPos: usize,
+};
+
+pub const ZSContinue = struct {
+    startPos: usize,
+    endPos: usize,
+};
+
+pub const ZSForExpr = struct {
+    init: *ast_node.ZSAstNode,
+    condition: *ZSExpr,
+    step: *ast_node.ZSAstNode,
+    body: *ZSExpr,
+    startPos: usize,
+    endPos: usize,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        self.init.deinit(allocator);
+        allocator.destroy(self.init);
+        self.condition.deinit(allocator);
+        allocator.destroy(self.condition);
+        self.step.deinit(allocator);
+        allocator.destroy(self.step);
+        self.body.deinit(allocator);
+        allocator.destroy(self.body);
+    }
+};
+
+pub const ZSUnary = struct {
+    op: []const u8,
+    operand: *ZSExpr,
+    startPos: usize,
+    endPos: usize,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        self.operand.deinit(allocator);
+        allocator.destroy(self.operand);
     }
 };

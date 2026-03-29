@@ -276,7 +276,7 @@ fn nextReassign(self: *Self) Error!?ast.stmt.ZSReassign {
 }
 
 fn isKeyword(value: []const u8) bool {
-    const keywords = [_][]const u8{ "if", "while", "return", "else", "let", "const", "fn", "struct", "enum", "match", "use", "external", "true", "false", "import", "export", "from", "as", "char" };
+    const keywords = [_][]const u8{ "if", "while", "for", "break", "continue", "return", "else", "let", "const", "fn", "struct", "enum", "match", "use", "external", "true", "false", "import", "export", "from", "as", "char" };
     for (keywords) |kw| {
         if (std.mem.eql(u8, value, kw)) return true;
     }
@@ -288,8 +288,12 @@ fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
         if (try self.nextMatchExpr()) |m| break :blk ast.expr.ZSExpr{ .match_expr = m };
         if (try self.nextIfExpr()) |e| break :blk ast.expr.ZSExpr{ .if_expr = e };
         if (try self.nextWhileExpr()) |e| break :blk ast.expr.ZSExpr{ .while_expr = e };
+        if (try self.nextForExpr()) |e| break :blk ast.expr.ZSExpr{ .for_expr = e };
+        if (try self.nextBreak()) |b| break :blk ast.expr.ZSExpr{ .break_expr = b };
+        if (try self.nextContinue()) |c| break :blk ast.expr.ZSExpr{ .continue_expr = c };
         if (try self.nextReturn()) |r| break :blk ast.expr.ZSExpr{ .return_expr = r };
         if (try self.nextBlock()) |b| break :blk ast.expr.ZSExpr{ .block = b };
+        if (try self.nextUnaryNot()) |u| break :blk ast.expr.ZSExpr{ .unary = u };
         if (try self.nextArrayLiteral()) |a| break :blk ast.expr.ZSExpr{ .array_literal = a };
         if (try self.nextNegativeNumber()) |n| break :blk ast.expr.ZSExpr{ .number = n };
         if (try self.nextNumber()) |n| break :blk ast.expr.ZSExpr{ .number = n };
@@ -562,6 +566,8 @@ fn nextArrayLiteral(self: *Self) Error!?ast.expr.ZSArrayLiteral {
 
 fn nextBinaryRhs(self: *Self, lhs: ast.expr.ZSExpr) Error!?ast.expr.ZSBinary {
     const op = blk: {
+        if (self.checkToken("&&")) break :blk "&&";
+        if (self.checkToken("||")) break :blk "||";
         if (self.checkToken("==")) break :blk "==";
         if (self.checkToken("!=")) break :blk "!=";
         if (self.checkToken(">=")) break :blk ">=";
@@ -660,6 +666,86 @@ fn nextWhileExpr(self: *Self) Error!?ast.expr.ZSWhileExpr {
         .body = bodyPtr,
         .startPos = startPos,
         .endPos = bodyExpr.end(),
+    };
+}
+
+fn nextForExpr(self: *Self) Error!?ast.expr.ZSForExpr {
+    if (!(self.checkToken("for"))) return null;
+    const forToken = try self.peekToken();
+    const startPos = forToken.startPos;
+    self.shiftToken();
+
+    try self.expectToken("(");
+
+    // Init: a variable declaration (let/const)
+    const modifiers = try self.nextModifiers();
+    const varDecl = try self.nextVar(modifiers) orelse return Error.UnexpectedEndOfInput;
+    const initNode = try self.allocator.create(ast.ZSAstNode);
+    initNode.* = ast.ZSAstNode{ .stmt = ast.stmt.ZSStmt{ .variable = varDecl } };
+
+    try self.expectToken(";");
+
+    // Condition
+    const condition = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+    const condPtr = try self.allocator.create(ast.expr.ZSExpr);
+    condPtr.* = condition;
+
+    try self.expectToken(";");
+
+    // Step: a reassignment
+    const reassign = try self.nextReassign() orelse return Error.UnexpectedEndOfInput;
+    const stepNode = try self.allocator.create(ast.ZSAstNode);
+    stepNode.* = ast.ZSAstNode{ .stmt = ast.stmt.ZSStmt{ .reassign = reassign } };
+
+    try self.expectToken(")");
+
+    // Body
+    const bodyExpr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+    const bodyPtr = try self.allocator.create(ast.expr.ZSExpr);
+    bodyPtr.* = bodyExpr;
+
+    return ast.expr.ZSForExpr{
+        .init = initNode,
+        .condition = condPtr,
+        .step = stepNode,
+        .body = bodyPtr,
+        .startPos = startPos,
+        .endPos = bodyExpr.end(),
+    };
+}
+
+fn nextBreak(self: *Self) Error!?ast.expr.ZSBreak {
+    if (!(self.checkToken("break"))) return null;
+    const token = try self.peekToken();
+    self.shiftToken();
+    return ast.expr.ZSBreak{
+        .startPos = token.startPos,
+        .endPos = token.endPos,
+    };
+}
+
+fn nextContinue(self: *Self) Error!?ast.expr.ZSContinue {
+    if (!(self.checkToken("continue"))) return null;
+    const token = try self.peekToken();
+    self.shiftToken();
+    return ast.expr.ZSContinue{
+        .startPos = token.startPos,
+        .endPos = token.endPos,
+    };
+}
+
+fn nextUnaryNot(self: *Self) Error!?ast.expr.ZSUnary {
+    if (!(self.checkToken("!"))) return null;
+    const token = try self.peekToken();
+    self.shiftToken();
+    const operand = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+    const operandPtr = try self.allocator.create(ast.expr.ZSExpr);
+    operandPtr.* = operand;
+    return ast.expr.ZSUnary{
+        .op = "!",
+        .operand = operandPtr,
+        .startPos = token.startPos,
+        .endPos = operand.end(),
     };
 }
 
