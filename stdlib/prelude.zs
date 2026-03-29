@@ -41,6 +41,14 @@ export fn print_number(n: number): void {
 
 export fn print(n: number): void = print_number(n)
 
+export fn alloc(size: long): long {
+  return __syscall6(9, 0, size, 3, 34, -1, 0)
+}
+
+export fn free(addr: long, size: long): void {
+  __syscall2(11, addr, size)
+}
+
 export fn read_line(): String {
   let buf = ['\0'; 1024]
   let bytes = __syscall3(0, 0, ptr(buf), 1024)

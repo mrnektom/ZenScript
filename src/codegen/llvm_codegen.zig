@@ -680,8 +680,16 @@ fn generateCall(
     }
 
     // Handle intrinsics
+    if (std.mem.eql(u8, call.fnName, "__syscall2")) {
+        try generateSyscall2(builder, locals, call);
+        return;
+    }
     if (std.mem.eql(u8, call.fnName, "__syscall3")) {
         try generateSyscall3(builder, locals, call);
+        return;
+    }
+    if (std.mem.eql(u8, call.fnName, "__syscall6")) {
+        try generateSyscall6(builder, locals, call);
         return;
     }
     const fnNameZ = try allocator.dupeZ(u8, call.fnName);
@@ -768,6 +776,100 @@ fn generateSyscall3(
     const ptr = core.LLVMBuildAlloca(builder, i32Type, "sysres");
     _ = core.LLVMBuildStore(builder, result32, ptr);
     try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = i32Type });
+}
+
+fn generateSyscall2(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    call: ir.ZSIRCall,
+) !void {
+    if (call.argNames.len != 3) return;
+
+    const i64Type = core.LLVMInt64Type();
+
+    var args64: [3]types.LLVMValueRef = undefined;
+    for (call.argNames, 0..) |argName, i| {
+        if (locals.get(argName)) |local| {
+            const val = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "sarg");
+            if (core.LLVMGetTypeKind(local.ty) == .LLVMIntegerTypeKind and
+                core.LLVMGetIntTypeWidth(local.ty) == 64)
+            {
+                args64[i] = val;
+            } else {
+                args64[i] = core.LLVMBuildSExt(builder, val, i64Type, "sext");
+            }
+        } else {
+            return;
+        }
+    }
+
+    var paramTypes: [3]types.LLVMTypeRef = .{ i64Type, i64Type, i64Type };
+    const asmFnType = core.LLVMFunctionType(i64Type, &paramTypes, 3, 0);
+    const constraint = "={rax},{rax},{rdi},{rsi},~{rcx},~{r11},~{memory}";
+    const inlineAsm = core.LLVMGetInlineAsm(
+        asmFnType,
+        @constCast("syscall"),
+        7,
+        @constCast(constraint),
+        constraint.len,
+        1,
+        0,
+        .LVMInlineAsmDialectATT,
+        0,
+    );
+
+    const result64 = core.LLVMBuildCall2(builder, asmFnType, inlineAsm, &args64, 3, "syscall");
+
+    const ptr = core.LLVMBuildAlloca(builder, i64Type, "sysres");
+    _ = core.LLVMBuildStore(builder, result64, ptr);
+    try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = i64Type });
+}
+
+fn generateSyscall6(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    call: ir.ZSIRCall,
+) !void {
+    if (call.argNames.len != 7) return;
+
+    const i64Type = core.LLVMInt64Type();
+
+    var args64: [7]types.LLVMValueRef = undefined;
+    for (call.argNames, 0..) |argName, i| {
+        if (locals.get(argName)) |local| {
+            const val = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "sarg");
+            if (core.LLVMGetTypeKind(local.ty) == .LLVMIntegerTypeKind and
+                core.LLVMGetIntTypeWidth(local.ty) == 64)
+            {
+                args64[i] = val;
+            } else {
+                args64[i] = core.LLVMBuildSExt(builder, val, i64Type, "sext");
+            }
+        } else {
+            return;
+        }
+    }
+
+    var paramTypes: [7]types.LLVMTypeRef = .{ i64Type, i64Type, i64Type, i64Type, i64Type, i64Type, i64Type };
+    const asmFnType = core.LLVMFunctionType(i64Type, &paramTypes, 7, 0);
+    const constraint = "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}";
+    const inlineAsm = core.LLVMGetInlineAsm(
+        asmFnType,
+        @constCast("syscall"),
+        7,
+        @constCast(constraint),
+        constraint.len,
+        1,
+        0,
+        .LVMInlineAsmDialectATT,
+        0,
+    );
+
+    const result64 = core.LLVMBuildCall2(builder, asmFnType, inlineAsm, &args64, 7, "syscall");
+
+    const ptr = core.LLVMBuildAlloca(builder, i64Type, "sysres");
+    _ = core.LLVMBuildStore(builder, result64, ptr);
+    try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = i64Type });
 }
 
 fn generateStructInit(
@@ -1148,7 +1250,7 @@ fn getStringType() types.LLVMTypeRef {
 
 fn getValue(builder: types.LLVMBuilderRef, value: *const ir.ZSIRValue) !types.LLVMValueRef {
     return switch (value.*) {
-        .number => core.LLVMConstInt(core.LLVMInt32Type(), @intCast(value.number), 1),
+        .number => core.LLVMConstInt(core.LLVMInt32Type(), @bitCast(@as(i64, value.number)), 1),
         .string => getStringValue(builder, value.string),
         .boolean => core.LLVMConstInt(core.LLVMInt1Type(), if (value.boolean) 1 else 0, 0),
         .char => core.LLVMConstInt(core.LLVMInt8Type(), @intCast(value.char), 0),

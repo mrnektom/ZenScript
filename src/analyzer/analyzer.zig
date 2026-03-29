@@ -226,7 +226,9 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
     }
 
     // Register intrinsics
+    try analyzer.registerIntrinsic(allocator, "__syscall2", &.{ "long", "long", "long" }, .long);
     try analyzer.registerIntrinsic(allocator, "__syscall3", &.{ "number", "number", "number", "number" }, .number);
+    try analyzer.registerIntrinsic(allocator, "__syscall6", &.{ "long", "long", "long", "long", "long", "long", "long" }, .long);
     // Inject prelude exports into scope
     if (preludeExports) |exports| {
         var iter = exports.iterator();

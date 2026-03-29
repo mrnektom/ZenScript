@@ -291,6 +291,7 @@ fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
         if (try self.nextReturn()) |r| break :blk ast.expr.ZSExpr{ .return_expr = r };
         if (try self.nextBlock()) |b| break :blk ast.expr.ZSExpr{ .block = b };
         if (try self.nextArrayLiteral()) |a| break :blk ast.expr.ZSExpr{ .array_literal = a };
+        if (try self.nextNegativeNumber()) |n| break :blk ast.expr.ZSExpr{ .number = n };
         if (try self.nextNumber()) |n| break :blk ast.expr.ZSExpr{ .number = n };
         if (try self.nextCharLiteral()) |c| break :blk ast.expr.ZSExpr{ .char = c };
         if (try self.nextBoolean()) |b| break :blk ast.expr.ZSExpr{ .boolean = b };
@@ -1134,6 +1135,34 @@ fn nextNumber(self: *Self) Error!?ast.expr.ZSNumber {
         .value = token.value,
         .startPos = token.startPos,
         .endPos = token.endPos,
+    };
+}
+
+fn nextNegativeNumber(self: *Self) Error!?ast.expr.ZSNumber {
+    const token = try self.peekToken();
+    if (token.type != .punctuation or !std.mem.eql(u8, token.value, "-")) return null;
+
+    // Save state in case the next token is not numeric
+    const savedPeeked = self.peekedToken;
+    const savedPos = self.tokenizer.position;
+    const savedLine = self.tokenizer.line;
+
+    self.shiftToken(); // consume "-"
+    const next = try self.peekToken();
+    if (next.type != .numeric) {
+        // Backtrack
+        self.peekedToken = savedPeeked;
+        self.tokenizer.position = savedPos;
+        self.tokenizer.line = savedLine;
+        return null;
+    }
+    self.shiftToken(); // consume the number
+
+    const negValue = try std.fmt.allocPrint(self.allocator, "-{s}", .{next.value});
+    return ast.expr.ZSNumber{
+        .value = negValue,
+        .startPos = token.startPos,
+        .endPos = next.endPos,
     };
 }
 
