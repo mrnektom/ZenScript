@@ -12,6 +12,7 @@ nameCount: usize = 0,
 varNames: std.StringHashMap([]const u8),
 resolutions: *const std.AutoHashMap(usize, []const u8),
 overloadedNames: *const std.StringHashMap(void),
+fieldIndices: *const std.AutoHashMap(usize, u32),
 
 pub const IrGenResult = struct {
     instructions: ir.ZSIRInstructions,
@@ -28,8 +29,9 @@ pub fn generateIr(
     allocator: std.mem.Allocator,
     resolutions: *const std.AutoHashMap(usize, []const u8),
     overloadedNames: *const std.StringHashMap(void),
+    fieldIndices: *const std.AutoHashMap(usize, u32),
 ) !IrGenResult {
-    return generateIrWithImports(module, allocator, resolutions, overloadedNames, null);
+    return generateIrWithImports(module, allocator, resolutions, overloadedNames, fieldIndices, null);
 }
 
 pub fn generateIrWithImports(
@@ -37,6 +39,7 @@ pub fn generateIrWithImports(
     allocator: std.mem.Allocator,
     resolutions: *const std.AutoHashMap(usize, []const u8),
     overloadedNames: *const std.StringHashMap(void),
+    fieldIndices: *const std.AutoHashMap(usize, u32),
     importedVarNames: ?*const std.StringHashMap([]const u8),
 ) !IrGenResult {
     var instructions = try std.ArrayList(ir.ZSIR).initCapacity(allocator, 5);
@@ -57,6 +60,7 @@ pub fn generateIrWithImports(
         .varNames = varNames,
         .resolutions = resolutions,
         .overloadedNames = overloadedNames,
+        .fieldIndices = fieldIndices,
     };
 
     for (module.ast) |node| {
@@ -472,10 +476,12 @@ fn generateStructInit(self: *Self, si: ast.expr.ZSStructInit) Error![]const u8 {
 fn generateFieldAccess(self: *Self, fa: ast.expr.ZSFieldAccess) Error![]const u8 {
     const subjectName = try self.generateExpr(fa.subject.*);
     const resultName = try self.generateName();
+    const fieldIndex = self.fieldIndices.get(fa.startPos) orelse 0;
     try self.instructions.append(self.allocator, ir.ZSIR{ .field_access = .{
         .resultName = resultName,
         .subject = subjectName,
         .field = fa.field,
+        .fieldIndex = fieldIndex,
     } });
     return resultName;
 }

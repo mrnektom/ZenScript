@@ -1,7 +1,7 @@
 export { String } from "./string.zs"
 
 export fn print(s: String): void {
-  __syscall3(1, 1, __ptr_to_int(s), __str_len(s))
+  __syscall3(1, 1, __ptr_to_int(s), s.len)
   __syscall3(1, 1, __ptr_to_int("\n"), 1)
 }
 

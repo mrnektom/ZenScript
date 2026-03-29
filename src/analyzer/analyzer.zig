@@ -24,6 +24,7 @@ allocatedStructFields: std.ArrayList([]sig.ZSStructField),
 allocatedTypeSlices: std.ArrayList([]const Symbol.ZSType),
 structDefs: std.StringHashMap(StructDef),
 exportedStructDefs: std.StringHashMap(StructDef),
+fieldIndices: std.AutoHashMap(usize, u32),
 
 pub const StructDef = struct {
     name: []const u8,
@@ -53,6 +54,7 @@ pub const AnalyzeResult = struct {
     allocatedTypeSlices: std.ArrayList([]const Symbol.ZSType),
     structDefs: std.StringHashMap(StructDef),
     exportedStructDefs: std.StringHashMap(StructDef),
+    fieldIndices: std.AutoHashMap(usize, u32),
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         allocator.free(self.errors);
@@ -101,6 +103,7 @@ pub const AnalyzeResult = struct {
 
         self.structDefs.deinit();
         self.exportedStructDefs.deinit();
+        self.fieldIndices.deinit();
     }
 };
 
@@ -145,6 +148,7 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .allocatedTypeSlices = try std.ArrayList([]const Symbol.ZSType).initCapacity(allocator, 4),
         .structDefs = std.StringHashMap(StructDef).init(allocator),
         .exportedStructDefs = std.StringHashMap(StructDef).init(allocator),
+        .fieldIndices = std.AutoHashMap(usize, u32).init(allocator),
     };
 
     // Note: resolutions, overloadedNames, overloads, allocatedStrings, allocatedTypes,
@@ -181,7 +185,6 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
             try entries.append(allocator, .{ .argTypes = argTypes2, .mangledName = "__ptr_to_int", .retType = .number, .external = true });
         }
     }
-    try analyzer.registerIntrinsic(allocator, "__str_len", &.{"String"}, .number);
     try analyzer.registerIntrinsic(allocator, "__read_line", &.{}, getStringStructTypeStatic());
 
     // Inject prelude exports into scope
@@ -259,6 +262,7 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .allocatedTypeSlices = analyzer.allocatedTypeSlices,
         .structDefs = analyzer.structDefs,
         .exportedStructDefs = analyzer.exportedStructDefs,
+        .fieldIndices = analyzer.fieldIndices,
     };
 }
 
@@ -950,8 +954,9 @@ fn analyzeFieldAccess(self: *Self, fa: ast.expr.ZSFieldAccess) Error!Symbol.ZSTy
     const subjectType = try self.analyzeExpr(fa.subject.*);
     return switch (subjectType) {
         .struct_type => |st| {
-            for (st.fields) |field| {
+            for (st.fields, 0..) |field, i| {
                 if (std.mem.eql(u8, field.name, fa.field)) {
+                    try self.fieldIndices.put(fa.startPos, @intCast(i));
                     return field.type;
                 }
             }

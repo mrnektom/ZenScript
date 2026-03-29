@@ -242,6 +242,7 @@ pub const ZSIRFieldAccess = struct {
     resultName: []const u8,
     subject: []const u8,
     field: []const u8,
+    fieldIndex: u32,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         allocator.free(self.resultName);

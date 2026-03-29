@@ -94,6 +94,7 @@ fn compileModule(
         allocator,
         &analyzeResult.resolutions,
         &analyzeResult.overloadedNames,
+        &analyzeResult.fieldIndices,
         &importedVarNames,
     );
 
@@ -290,6 +291,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
             allocator,
             &analyzeResult.resolutions,
             &analyzeResult.overloadedNames,
+            &analyzeResult.fieldIndices,
             &importedVarNames,
         );
         defer entryIrResult.deinit(allocator);

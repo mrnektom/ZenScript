@@ -111,7 +111,7 @@ fn generateInstruction(
         .index_store => generateIndexStore(builder, locals, instruction.index_store),
         // Struct/pointer instructions — stubs for future implementation
         .struct_init => {},
-        .field_access => {},
+        .field_access => try generateFieldAccess(builder, locals, instruction.field_access),
         .ptr_op => try generatePtrOp(builder, locals, instruction.ptr_op),
         .deref_op => {},
     }
@@ -683,10 +683,6 @@ fn generateCall(
         try generatePtrToInt(builder, locals, call);
         return;
     }
-    if (std.mem.eql(u8, call.fnName, "__str_len")) {
-        try generateStrLen(builder, locals, call);
-        return;
-    }
     if (std.mem.eql(u8, call.fnName, "__read_line")) {
         try generateReadLine(builder, module, locals, call, allocator);
         return;
@@ -807,21 +803,29 @@ fn generatePtrToInt(
     }
 }
 
-fn generateStrLen(
+fn generateFieldAccess(
     builder: types.LLVMBuilderRef,
     locals: *std.StringHashMap(LocalVar),
-    call: ir.ZSIRCall,
+    fa: ir.ZSIRFieldAccess,
 ) !void {
-    if (call.argNames.len != 1) return;
+    const local = locals.get(fa.subject) orelse return;
+    const typeKind = core.LLVMGetTypeKind(local.ty);
 
-    if (locals.get(call.argNames[0])) |local| {
-        const strStruct = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "str");
-        // ZSString = { i32 len, i8* ptr }, extract len at index 0
-        const strLen = core.LLVMBuildExtractValue(builder, strStruct, 0, "strlen");
-
-        const ptr = core.LLVMBuildAlloca(builder, core.LLVMInt32Type(), "strlenres");
-        _ = core.LLVMBuildStore(builder, strLen, ptr);
-        try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = core.LLVMInt32Type() });
+    if (typeKind == .LLVMStructTypeKind) {
+        // Struct field access: load struct, extractvalue at fieldIndex
+        const structVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "structval");
+        const extracted = core.LLVMBuildExtractValue(builder, structVal, fa.fieldIndex, "field");
+        const resultTy = core.LLVMTypeOf(extracted);
+        const ptr = core.LLVMBuildAlloca(builder, resultTy, "fieldres");
+        _ = core.LLVMBuildStore(builder, extracted, ptr);
+        try locals.put(fa.resultName, LocalVar{ .ptr = ptr, .ty = resultTy });
+    } else if (typeKind == .LLVMArrayTypeKind) {
+        // Array .length pseudo-field
+        const length = core.LLVMGetArrayLength(local.ty);
+        const lengthVal = core.LLVMConstInt(core.LLVMInt32Type(), length, 0);
+        const ptr = core.LLVMBuildAlloca(builder, core.LLVMInt32Type(), "arrlen");
+        _ = core.LLVMBuildStore(builder, lengthVal, ptr);
+        try locals.put(fa.resultName, LocalVar{ .ptr = ptr, .ty = core.LLVMInt32Type() });
     }
 }
 
