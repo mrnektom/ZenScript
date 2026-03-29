@@ -75,7 +75,17 @@ fn generateNode(self: *Self, node: ast.ZSAstNode) ![]const u8 {
         .stmt => try self.generateStmt(node.stmt),
         .expr => self.generateExpr(node.expr),
         .import_decl => |imp| try self.generateImport(imp),
+        .export_from => |ef| try self.generateExportFrom(ef),
     };
+}
+
+fn generateExportFrom(self: *Self, ef: ast.ZSExportFrom) ![]const u8 {
+    // export_from acts as an import at the IR level
+    try self.instructions.append(
+        self.allocator,
+        ir.ZSIR{ .module_init = ir.ZSIRModuleInit{ .name = ef.path } },
+    );
+    return "";
 }
 
 fn generateImport(self: *Self, imp: ast.ZSImport) ![]const u8 {
@@ -91,6 +101,7 @@ fn generateStmt(self: *Self, stmt: ast.stmt.ZSStmt) ![]const u8 {
         .variable => try self.generateVariable(stmt.variable),
         .function => try self.generateFunction(stmt.function),
         .reassign => try self.generateReassign(stmt.reassign),
+        .struct_decl => "",  // Struct declarations don't generate IR instructions
     };
 }
 
@@ -99,14 +110,43 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
         .number => self.generateNumberAssign(expr.number),
         .string => self.generateStringAssign(expr.string),
         .boolean => self.generateBooleanAssign(expr.boolean),
-        .call => self.generateCall(expr.call),
+        .call => self.generateCallOrIntrinsic(expr.call),
         .reference => self.generateReference(expr.reference),
         .if_expr => self.generateIfExpr(expr.if_expr),
         .while_expr => self.generateWhileExpr(expr.while_expr),
         .binary => self.generateBinary(expr.binary),
         .block => self.generateBlock(expr.block),
         .return_expr => self.generateReturn(expr.return_expr),
+        .struct_init => self.generateStructInit(expr.struct_init),
+        .field_access => self.generateFieldAccess(expr.field_access),
     };
+}
+
+fn generateCallOrIntrinsic(self: *Self, call: ast.expr.ZSCall) Error![]const u8 {
+    // Check for ptr/deref intrinsics
+    const subject = call.subject.*;
+    if (subject == .reference) {
+        const name = subject.reference.name;
+        if (std.mem.eql(u8, name, "ptr") and call.arguments.len == 1) {
+            const operand = try self.generateExpr(call.arguments[0]);
+            const resultName = try self.generateName();
+            try self.instructions.append(self.allocator, ir.ZSIR{ .ptr_op = .{
+                .resultName = resultName,
+                .operand = operand,
+            } });
+            return resultName;
+        }
+        if (std.mem.eql(u8, name, "deref") and call.arguments.len == 1) {
+            const operand = try self.generateExpr(call.arguments[0]);
+            const resultName = try self.generateName();
+            try self.instructions.append(self.allocator, ir.ZSIR{ .deref_op = .{
+                .resultName = resultName,
+                .operand = operand,
+            } });
+            return resultName;
+        }
+    }
+    return self.generateCall(call);
 }
 
 fn generateCall(self: *Self, call: ast.expr.ZSCall) Error![]const u8 {
@@ -166,10 +206,10 @@ fn generateReassign(self: *Self, reassign: ast.stmt.ZSReassign) ![]const u8 {
 fn generateFunction(self: *Self, func: ast.stmt.ZSFn) ![]const u8 {
     const argTypes = try self.allocator.alloc([]const u8, func.args.len);
     for (func.args, 0..) |arg, i| {
-        argTypes[i] = if (arg.type) |t| t.reference else "unknown";
+        argTypes[i] = if (arg.type) |t| t.typeName() else "unknown";
     }
 
-    const retType: []const u8 = if (func.ret) |r| r.reference else "void";
+    const retType: []const u8 = if (func.ret) |r| r.typeName() else "void";
     const external = func.modifiers.external != null;
 
     // Determine the function name: mangle if overloaded and not external
@@ -222,10 +262,11 @@ fn generateFunction(self: *Self, func: ast.stmt.ZSFn) ![]const u8 {
             );
         }
 
-        // Restore outer state
+        // Restore outer state — capture modified inner map before overwriting
         self.instructions = outerInstructions;
+        var modifiedInner = self.varNames;
         self.varNames = outerVarNames;
-        innerVarNames.deinit();
+        modifiedInner.deinit();
 
         try self.instructions.append(
             self.allocator,
@@ -392,6 +433,32 @@ fn generateReturn(self: *Self, ret: ast.expr.ZSReturn) Error![]const u8 {
         },
     );
     return "";
+}
+
+fn generateStructInit(self: *Self, si: ast.expr.ZSStructInit) Error![]const u8 {
+    const fields = try self.allocator.alloc(ir.ZSIRFieldValue, si.field_values.len);
+    for (si.field_values, 0..) |fv, i| {
+        const valueName = try self.generateExpr(fv.value);
+        fields[i] = .{ .name = fv.name, .value = valueName };
+    }
+    const resultName = try self.generateName();
+    try self.instructions.append(self.allocator, ir.ZSIR{ .struct_init = .{
+        .resultName = resultName,
+        .structName = si.name,
+        .fields = fields,
+    } });
+    return resultName;
+}
+
+fn generateFieldAccess(self: *Self, fa: ast.expr.ZSFieldAccess) Error![]const u8 {
+    const subjectName = try self.generateExpr(fa.subject.*);
+    const resultName = try self.generateName();
+    try self.instructions.append(self.allocator, ir.ZSIR{ .field_access = .{
+        .resultName = resultName,
+        .subject = subjectName,
+        .field = fa.field,
+    } });
+    return resultName;
 }
 
 fn generateNumberAssign(self: *Self, number: ast.expr.ZSNumber) Error![]const u8 {

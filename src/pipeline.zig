@@ -253,11 +253,15 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
 
     // Auto-import stdlib prelude
     var preludeExports: ?*const @import("analyzer/symbol_table_stack.zig").SymbolTable = null;
+    var preludeOverloads: ?*const std.StringHashMap(std.ArrayList(Analyzer.OverloadEntry)) = null;
+    var preludeStructDefs: ?*const std.StringHashMap(Analyzer.StructDef) = null;
     if (try findPreludePath(allocator)) |pPath| {
         defer allocator.free(pPath);
         if (compileModule(allocator, pPath, &cache, &inProgress, &allSources, &allModules)) |preludeCompiled| {
             try depCompiled.append(allocator, preludeCompiled);
             preludeExports = &preludeCompiled.analyzeResult.exports;
+            preludeOverloads = &preludeCompiled.analyzeResult.overloads;
+            preludeStructDefs = &preludeCompiled.analyzeResult.exportedStructDefs;
 
             // Map all exported symbols from prelude to IR names
             var exportIter = preludeCompiled.analyzeResult.exports.iterator();
@@ -273,7 +277,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
 
     std.debug.print("Analyzing\n", .{});
 
-    var analyzeResult = try Analyzer.analyzeWithPrelude(module, allocator, &depAnalyzeResults, preludeExports);
+    var analyzeResult = try Analyzer.analyzeWithPrelude(module, allocator, &depAnalyzeResults, preludeExports, preludeOverloads, preludeStructDefs);
     defer analyzeResult.deinit(allocator);
 
     for (analyzeResult.errors) |e| {

@@ -61,6 +61,12 @@ pub fn parse(self: *Self, allocator: std.mem.Allocator) !ZSModule {
                     .symbols = imp.symbols,
                 });
             },
+            .export_from => |ef| {
+                try depsList.append(allocator, zsm.ZSModuleDep{
+                    .path = ef.path,
+                    .symbols = ef.symbols,
+                });
+            },
             else => {},
         }
     }
@@ -77,6 +83,9 @@ fn nextNode(self: *Self) !?ZSAstNode {
     if (!self.tokenizer.hasNext() and self.peekedToken == null) return null;
     if (try self.nextImport()) |imp| {
         return ZSAstNode{ .import_decl = imp };
+    }
+    if (try self.nextExportFrom()) |ef| {
+        return ZSAstNode{ .export_from = ef };
     }
     const s = self.nextStmt() catch |err| {
         if (try self.nextExpr()) |e| {
@@ -141,9 +150,76 @@ fn nextImport(self: *Self) Error!?ast.ZSImport {
     };
 }
 
+fn nextExportFrom(self: *Self) Error!?ast.ZSExportFrom {
+    // Must be `export` followed by `{`
+    if (!self.checkToken("export")) return null;
+
+    // Save state for backtracking
+    const savedPeeked = self.peekedToken;
+    const savedPos = self.tokenizer.position;
+    const savedLine = self.tokenizer.line;
+
+    const startToken = try self.peekToken();
+    self.shiftToken(); // consume `export`
+
+    if (!self.checkToken("{")) {
+        // Backtrack — this is `export fn/let/...`, not `export { ... } from`
+        self.peekedToken = savedPeeked;
+        self.tokenizer.position = savedPos;
+        self.tokenizer.line = savedLine;
+        return null;
+    }
+    self.shiftToken(); // consume `{`
+
+    var symbols = try std.ArrayList(ast.zs_import.ImportedSymbol).initCapacity(self.allocator, 4);
+    defer symbols.deinit(self.allocator);
+
+    while (true) {
+        if (self.checkToken("}")) break;
+        const name = try self.nextIdent();
+        var alias: ?[]const u8 = null;
+        if (self.checkToken("as")) {
+            self.shiftToken();
+            alias = try self.nextIdent();
+        }
+        try symbols.append(self.allocator, .{ .name = name, .alias = alias });
+        if (self.checkToken(",")) {
+            self.shiftToken();
+            continue;
+        }
+        break;
+    }
+    try self.expectToken("}");
+
+    // expect "from"
+    const fromToken = try self.peekToken();
+    if (!std.mem.eql(u8, fromToken.value, "from")) return Error.UnexpectedToken;
+    self.shiftToken();
+
+    // parse path string
+    const pathToken = try self.peekToken();
+    if (pathToken.type != .string) return Error.UnexpectedTokenType;
+    self.shiftToken();
+
+    // Strip quotes from path
+    const rawPath = pathToken.value;
+    const path = if (std.mem.startsWith(u8, rawPath, "\"") and std.mem.endsWith(u8, rawPath, "\""))
+        rawPath[1 .. rawPath.len - 1]
+    else
+        rawPath;
+
+    return ast.ZSExportFrom{
+        .path = path,
+        .symbols = try self.allocator.dupe(ast.zs_import.ImportedSymbol, symbols.items),
+        .startPos = startToken.startPos,
+        .endPos = pathToken.endPos,
+    };
+}
+
 fn nextStmt(self: *Self) !?ast.stmt.ZSStmt {
     if (!self.tokenizer.hasNext() and self.peekedToken == null) return null;
     const modifiers = try self.nextModifiers();
+    if (try self.nextStruct(modifiers)) |s| return ast.stmt.ZSStmt{ .struct_decl = s };
     if (try self.nextVar(modifiers)) |v| return ast.stmt.ZSStmt{ .variable = v };
     if (try self.nextFn(modifiers)) |f| return ast.stmt.ZSStmt{ .function = f };
     if (try self.nextReassign()) |r| return ast.stmt.ZSStmt{ .reassign = r };
@@ -179,7 +255,7 @@ fn nextReassign(self: *Self) Error!?ast.stmt.ZSReassign {
 }
 
 fn isKeyword(value: []const u8) bool {
-    const keywords = [_][]const u8{ "if", "while", "return", "else", "let", "const", "fn", "external", "true", "false", "import", "export", "from", "as" };
+    const keywords = [_][]const u8{ "if", "while", "return", "else", "let", "const", "fn", "struct", "external", "true", "false", "import", "export", "from", "as" };
     for (keywords) |kw| {
         if (std.mem.eql(u8, value, kw)) return true;
     }
@@ -187,21 +263,30 @@ fn isKeyword(value: []const u8) bool {
 }
 
 fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
-    const expr = blk: {
+    var expr = blk: {
         if (try self.nextIfExpr()) |e| break :blk ast.expr.ZSExpr{ .if_expr = e };
         if (try self.nextWhileExpr()) |e| break :blk ast.expr.ZSExpr{ .while_expr = e };
         if (try self.nextReturn()) |r| break :blk ast.expr.ZSExpr{ .return_expr = r };
         if (try self.nextBlock()) |b| break :blk ast.expr.ZSExpr{ .block = b };
         if (try self.nextNumber()) |n| break :blk ast.expr.ZSExpr{ .number = n };
         if (try self.nextBoolean()) |b| break :blk ast.expr.ZSExpr{ .boolean = b };
-        if (try self.nextReference()) |r| break :blk ast.expr.ZSExpr{ .reference = r };
+        if (try self.nextReference()) |r| {
+            // Check for struct init: Name { field: value, ... }
+            if (try self.nextStructInit(r)) |si| break :blk ast.expr.ZSExpr{ .struct_init = si };
+            break :blk ast.expr.ZSExpr{ .reference = r };
+        }
         if (try self.nextString()) |s| break :blk ast.expr.ZSExpr{ .string = s };
         return null;
     };
 
+    // Check for field access chain: expr.field.field...
+    expr = try self.nextFieldAccessChain(expr);
+
     // Check for call
     if (try self.nextCall(expr)) |call| {
-        const callExpr = ast.expr.ZSExpr{ .call = call };
+        var callExpr = ast.expr.ZSExpr{ .call = call };
+        // Check for field access after call
+        callExpr = try self.nextFieldAccessChain(callExpr);
         // Check for binary op after call
         if (try self.nextBinaryRhs(callExpr)) |bin| {
             return ast.expr.ZSExpr{ .binary = bin };
@@ -215,6 +300,103 @@ fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
     }
 
     return expr;
+}
+
+fn nextStructInit(self: *Self, ref: ast.expr.ZSReference) Error!?ast.expr.ZSStructInit {
+    // Struct init: Name { field: value, ... }
+    // To disambiguate from blocks, we check if after '{' there's 'ident :'
+    if (!self.checkToken("{")) return null;
+
+    // Save state for backtracking
+    const savedPeeked = self.peekedToken;
+    const savedPos = self.tokenizer.position;
+    const savedLine = self.tokenizer.line;
+
+    self.shiftToken(); // consume '{'
+
+    // Check if this looks like a struct init (ident followed by ':')
+    const firstToken = self.peekToken() catch {
+        // Backtrack
+        self.peekedToken = savedPeeked;
+        self.tokenizer.position = savedPos;
+        self.tokenizer.line = savedLine;
+        return null;
+    };
+    if (firstToken.type != .ident or isKeyword(firstToken.value)) {
+        // Backtrack — this is a block, not a struct init
+        self.peekedToken = savedPeeked;
+        self.tokenizer.position = savedPos;
+        self.tokenizer.line = savedLine;
+        return null;
+    }
+
+    // Save again for second-level peek
+    const savedPeeked2 = self.peekedToken;
+    const savedPos2 = self.tokenizer.position;
+    const savedLine2 = self.tokenizer.line;
+
+    self.shiftToken(); // consume ident
+    const isStructInit = self.checkToken(":");
+    // Backtrack the ident consumption
+    self.peekedToken = savedPeeked2;
+    self.tokenizer.position = savedPos2;
+    self.tokenizer.line = savedLine2;
+
+    if (!isStructInit) {
+        // Backtrack — not a struct init
+        self.peekedToken = savedPeeked;
+        self.tokenizer.position = savedPos;
+        self.tokenizer.line = savedLine;
+        return null;
+    }
+
+    // Now parse the field values
+    var field_values = try std.ArrayList(ast.expr.ZSFieldInit).initCapacity(self.allocator, 4);
+    defer field_values.deinit(self.allocator);
+
+    while (true) {
+        if (self.checkToken("}")) break;
+        const fieldName = try self.nextIdent();
+        try self.expectToken(":");
+        const value = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+        try field_values.append(self.allocator, .{ .name = fieldName, .value = value });
+        if (self.checkToken(",")) {
+            self.shiftToken();
+            continue;
+        }
+        break;
+    }
+
+    const endToken = try self.peekToken();
+    try self.expectToken("}");
+
+    return ast.expr.ZSStructInit{
+        .name = ref.name,
+        .field_values = try self.allocator.dupe(ast.expr.ZSFieldInit, field_values.items),
+        .startPos = ref.startPos,
+        .endPos = endToken.endPos,
+    };
+}
+
+fn nextFieldAccessChain(self: *Self, initial: ast.expr.ZSExpr) Error!ast.expr.ZSExpr {
+    var current = initial;
+    while (self.checkToken(".")) {
+        self.shiftToken();
+        const fieldToken = try self.peekToken();
+        if (fieldToken.type != .ident) return Error.UnexpectedTokenType;
+        self.shiftToken();
+
+        const subjectPtr = try self.allocator.create(ast.expr.ZSExpr);
+        subjectPtr.* = current;
+
+        current = ast.expr.ZSExpr{ .field_access = .{
+            .subject = subjectPtr,
+            .field = fieldToken.value,
+            .startPos = current.start(),
+            .endPos = fieldToken.endPos,
+        } };
+    }
+    return current;
 }
 
 fn nextBinaryRhs(self: *Self, lhs: ast.expr.ZSExpr) Error!?ast.expr.ZSBinary {
@@ -440,11 +622,93 @@ fn nextFn(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSFn {
     };
 }
 
+fn nextStruct(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSStruct {
+    if (!self.checkToken("struct")) return null;
+    const startToken = try self.peekToken();
+    self.shiftToken();
+
+    const name = try self.nextIdent();
+
+    // Parse optional type parameters: <T, U>
+    var type_params = try std.ArrayList([]const u8).initCapacity(self.allocator, 2);
+    defer type_params.deinit(self.allocator);
+    if (self.checkToken("<")) {
+        self.shiftToken();
+        while (true) {
+            const paramName = try self.nextIdent();
+            try type_params.append(self.allocator, paramName);
+            if (self.checkToken(",")) {
+                self.shiftToken();
+                continue;
+            }
+            break;
+        }
+        try self.expectToken(">");
+    }
+
+    try self.expectToken("{");
+
+    var fields = try std.ArrayList(ast.stmt.ZSStruct.ZSStructField).initCapacity(self.allocator, 4);
+    defer fields.deinit(self.allocator);
+
+    while (true) {
+        if (self.checkToken("}")) break;
+        const fieldName = try self.nextIdent();
+        try self.expectToken(":");
+        const fieldType = try self.nextTypeInner();
+        try fields.append(self.allocator, .{ .name = fieldName, .type = fieldType });
+        if (self.checkToken(",")) {
+            self.shiftToken();
+            continue;
+        }
+        break;
+    }
+
+    const endToken = try self.peekToken();
+    try self.expectToken("}");
+
+    return ast.stmt.ZSStruct{
+        .name = name,
+        .type_params = try self.allocator.dupe([]const u8, type_params.items),
+        .fields = try self.allocator.dupe(ast.stmt.ZSStruct.ZSStructField, fields.items),
+        .modifiers = modifiers,
+        .startPos = startToken.startPos,
+        .endPos = endToken.endPos,
+    };
+}
+
 fn nextType(self: *Self) !?ast.ZSType {
     if (!self.checkToken(":")) return null;
     self.shiftToken();
 
+    return try self.nextTypeInner();
+}
+
+fn nextTypeInner(self: *Self) !ast.ZSType {
     const typeName = try self.nextIdent();
+
+    // Check for generic type args: Name<T, U>
+    if (self.checkToken("<")) {
+        self.shiftToken();
+        var type_args = try std.ArrayList(ast.type_notation.ZSType).initCapacity(self.allocator, 2);
+        defer type_args.deinit(self.allocator);
+
+        while (true) {
+            const arg = try self.nextTypeInner();
+            try type_args.append(self.allocator, arg);
+            if (self.checkToken(",")) {
+                self.shiftToken();
+                continue;
+            }
+            break;
+        }
+        try self.expectToken(">");
+
+        return ast.ZSType{ .generic = .{
+            .name = typeName,
+            .type_args = try self.allocator.dupe(ast.type_notation.ZSType, type_args.items),
+        } };
+    }
 
     return ast.ZSType{ .reference = typeName };
 }
@@ -690,21 +954,21 @@ test "parse function declaration" {
     try std.testing.expectEqualStrings("foo", f.name);
     try std.testing.expectEqual(@as(usize, 1), f.args.len);
     try std.testing.expectEqualStrings("x", f.args[0].name);
-    try std.testing.expectEqualStrings("int", f.args[0].type.?.reference);
-    try std.testing.expectEqualStrings("void", f.ret.?.reference);
+    try std.testing.expectEqualStrings("int", f.args[0].type.?.typeName());
+    try std.testing.expectEqualStrings("void", f.ret.?.typeName());
     try std.testing.expect(f.modifiers.external == null);
     try std.testing.expect(f.body == null);
 }
 
 test "parse external function" {
     const allocator = std.testing.allocator;
-    const module = try testParse("external fn print(msg: string): void");
+    const module = try testParse("external fn print(msg: String): void");
     defer module.deinit(allocator);
     const f = module.ast[0].stmt.function;
     try std.testing.expectEqualStrings("print", f.name);
     try std.testing.expectEqualStrings("msg", f.args[0].name);
-    try std.testing.expectEqualStrings("string", f.args[0].type.?.reference);
-    try std.testing.expectEqualStrings("void", f.ret.?.reference);
+    try std.testing.expectEqualStrings("String", f.args[0].type.?.typeName());
+    try std.testing.expectEqualStrings("void", f.ret.?.typeName());
     try std.testing.expect(f.modifiers.external != null);
     try std.testing.expect(f.body == null);
 }
@@ -751,7 +1015,7 @@ test "parse function with expression body" {
     const f = module.ast[0].stmt.function;
     try std.testing.expectEqualStrings("get_ten", f.name);
     try std.testing.expectEqual(@as(usize, 0), f.args.len);
-    try std.testing.expectEqualStrings("number", f.ret.?.reference);
+    try std.testing.expectEqualStrings("number", f.ret.?.typeName());
     try std.testing.expect(f.body != null);
     try std.testing.expectEqualStrings("10", f.body.?.number.value);
 }
@@ -810,4 +1074,106 @@ test "parse export fn" {
     try std.testing.expectEqualStrings("add", f.name);
     try std.testing.expect(f.modifiers.exported != null);
     try std.testing.expect(f.modifiers.external == null);
+}
+
+test "parse struct declaration" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("struct Point { x: number, y: number }");
+    defer module.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), module.ast.len);
+    const sd = module.ast[0].stmt.struct_decl;
+    try std.testing.expectEqualStrings("Point", sd.name);
+    try std.testing.expectEqual(@as(usize, 0), sd.type_params.len);
+    try std.testing.expectEqual(@as(usize, 2), sd.fields.len);
+    try std.testing.expectEqualStrings("x", sd.fields[0].name);
+    try std.testing.expectEqualStrings("number", sd.fields[0].type.typeName());
+    try std.testing.expectEqualStrings("y", sd.fields[1].name);
+    try std.testing.expectEqualStrings("number", sd.fields[1].type.typeName());
+}
+
+test "parse generic struct declaration" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("struct Pair<T, U> { first: T, second: U }");
+    defer module.deinit(allocator);
+    const sd = module.ast[0].stmt.struct_decl;
+    try std.testing.expectEqualStrings("Pair", sd.name);
+    try std.testing.expectEqual(@as(usize, 2), sd.type_params.len);
+    try std.testing.expectEqualStrings("T", sd.type_params[0]);
+    try std.testing.expectEqualStrings("U", sd.type_params[1]);
+    try std.testing.expectEqual(@as(usize, 2), sd.fields.len);
+    try std.testing.expectEqualStrings("first", sd.fields[0].name);
+    try std.testing.expectEqualStrings("T", sd.fields[0].type.typeName());
+    try std.testing.expectEqualStrings("second", sd.fields[1].name);
+    try std.testing.expectEqualStrings("U", sd.fields[1].type.typeName());
+}
+
+test "parse struct init expression" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("struct Point { x: number, y: number } let p = Point { x: 10, y: 20 }");
+    defer module.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), module.ast.len);
+    const si = module.ast[1].stmt.variable.expr.struct_init;
+    try std.testing.expectEqualStrings("Point", si.name);
+    try std.testing.expectEqual(@as(usize, 2), si.field_values.len);
+    try std.testing.expectEqualStrings("x", si.field_values[0].name);
+    try std.testing.expectEqualStrings("10", si.field_values[0].value.number.value);
+    try std.testing.expectEqualStrings("y", si.field_values[1].name);
+    try std.testing.expectEqualStrings("20", si.field_values[1].value.number.value);
+}
+
+test "parse field access" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("struct Point { x: number, y: number } let p = Point { x: 10, y: 20 } let v = p.x");
+    defer module.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), module.ast.len);
+    const fa = module.ast[2].stmt.variable.expr.field_access;
+    try std.testing.expectEqualStrings("x", fa.field);
+    try std.testing.expectEqualStrings("p", fa.subject.reference.name);
+}
+
+test "parse export from statement" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("export { String, add as sum } from \"./lib.zs\"");
+    defer module.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), module.ast.len);
+    const ef = module.ast[0].export_from;
+    try std.testing.expectEqualStrings("./lib.zs", ef.path);
+    try std.testing.expectEqual(@as(usize, 2), ef.symbols.len);
+    try std.testing.expectEqualStrings("String", ef.symbols[0].name);
+    try std.testing.expect(ef.symbols[0].alias == null);
+    try std.testing.expectEqualStrings("add", ef.symbols[1].name);
+    try std.testing.expectEqualStrings("sum", ef.symbols[1].alias.?);
+    // Should produce a dependency
+    try std.testing.expectEqual(@as(usize, 1), module.deps.len);
+    try std.testing.expectEqualStrings("./lib.zs", module.deps[0].path);
+}
+
+test "parse export from does not interfere with export fn" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("export fn add(a: number): number = a");
+    defer module.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), module.ast.len);
+    const f = module.ast[0].stmt.function;
+    try std.testing.expectEqualStrings("add", f.name);
+    try std.testing.expect(f.modifiers.exported != null);
+}
+
+test "parse generic type annotation" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("fn foo(x: Pointer<number>): Pair<number, String>");
+    defer module.deinit(allocator);
+    const f = module.ast[0].stmt.function;
+    // Arg type: Pointer<number>
+    const argType = f.args[0].type.?;
+    try std.testing.expectEqual(ast.type_notation.ZSTypeType.generic, @as(ast.type_notation.ZSTypeType, argType));
+    try std.testing.expectEqualStrings("Pointer", argType.generic.name);
+    try std.testing.expectEqual(@as(usize, 1), argType.generic.type_args.len);
+    try std.testing.expectEqualStrings("number", argType.generic.type_args[0].typeName());
+    // Ret type: Pair<number, String>
+    const retType = f.ret.?;
+    try std.testing.expectEqual(ast.type_notation.ZSTypeType.generic, @as(ast.type_notation.ZSTypeType, retType));
+    try std.testing.expectEqualStrings("Pair", retType.generic.name);
+    try std.testing.expectEqual(@as(usize, 2), retType.generic.type_args.len);
+    try std.testing.expectEqualStrings("number", retType.generic.type_args[0].typeName());
+    try std.testing.expectEqualStrings("String", retType.generic.type_args[1].typeName());
 }
