@@ -25,11 +25,32 @@ allocatedTypeSlices: std.ArrayList([]const Symbol.ZSType),
 structDefs: std.StringHashMap(StructDef),
 exportedStructDefs: std.StringHashMap(StructDef),
 fieldIndices: std.AutoHashMap(usize, u32),
+enumDefs: std.StringHashMap(EnumDef),
+exportedEnumDefs: std.StringHashMap(EnumDef),
+useAliases: std.StringHashMap(UseAlias),
+allocatedEnumVariants: std.ArrayList([]sig.ZSEnumVariant),
+enumInits: std.AutoHashMap(usize, EnumInitInfo),
+
+pub const EnumInitInfo = struct {
+    enumName: []const u8,
+    variantTag: u32,
+};
+
+const UseAlias = struct {
+    enum_name: []const u8,
+    variant_name: []const u8,
+};
 
 pub const StructDef = struct {
     name: []const u8,
     type_params: []const []const u8,
     fields: []ast.stmt.ZSStruct.ZSStructField,
+};
+
+pub const EnumDef = struct {
+    name: []const u8,
+    type_params: []const []const u8,
+    variants: []ast.stmt.ZSEnum.ZSEnumVariant,
 };
 
 pub const OverloadEntry = struct {
@@ -55,6 +76,10 @@ pub const AnalyzeResult = struct {
     structDefs: std.StringHashMap(StructDef),
     exportedStructDefs: std.StringHashMap(StructDef),
     fieldIndices: std.AutoHashMap(usize, u32),
+    enumDefs: std.StringHashMap(EnumDef),
+    exportedEnumDefs: std.StringHashMap(EnumDef),
+    allocatedEnumVariants: std.ArrayList([]sig.ZSEnumVariant),
+    enumInits: std.AutoHashMap(usize, EnumInitInfo),
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         allocator.free(self.errors);
@@ -104,6 +129,14 @@ pub const AnalyzeResult = struct {
         self.structDefs.deinit();
         self.exportedStructDefs.deinit();
         self.fieldIndices.deinit();
+        self.enumDefs.deinit();
+        self.exportedEnumDefs.deinit();
+
+        for (self.allocatedEnumVariants.items) |s| {
+            allocator.free(s);
+        }
+        self.allocatedEnumVariants.deinit(allocator);
+        self.enumInits.deinit();
     }
 };
 
@@ -122,6 +155,7 @@ fn typeToString(zsType: Symbol.ZSType) []const u8 {
         .struct_type => |st| st.name,
         .pointer => "pointer",
         .array_type => "array",
+        .enum_type => |et| et.name,
     };
 }
 
@@ -135,10 +169,10 @@ fn isNumericType(name: []const u8) bool {
 }
 
 pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator, deps: *const std.StringHashMap(AnalyzeResult)) !AnalyzeResult {
-    return analyzeWithPrelude(module, allocator, deps, null, null, null);
+    return analyzeWithPrelude(module, allocator, deps, null, null, null, null);
 }
 
-pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, deps: *const std.StringHashMap(AnalyzeResult), preludeExports: ?*const SymbolTable, preludeOverloads: ?*const std.StringHashMap(std.ArrayList(OverloadEntry)), preludeStructDefs: ?*const std.StringHashMap(StructDef)) !AnalyzeResult {
+pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, deps: *const std.StringHashMap(AnalyzeResult), preludeExports: ?*const SymbolTable, preludeOverloads: ?*const std.StringHashMap(std.ArrayList(OverloadEntry)), preludeStructDefs: ?*const std.StringHashMap(StructDef), preludeEnumDefs: ?*const std.StringHashMap(EnumDef)) !AnalyzeResult {
     var errors = try std.ArrayList(AnalyzeError).initCapacity(allocator, 1);
     defer errors.deinit(allocator);
     var tableStack = try sts.create(allocator);
@@ -161,10 +195,16 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .structDefs = std.StringHashMap(StructDef).init(allocator),
         .exportedStructDefs = std.StringHashMap(StructDef).init(allocator),
         .fieldIndices = std.AutoHashMap(usize, u32).init(allocator),
+        .enumDefs = std.StringHashMap(EnumDef).init(allocator),
+        .exportedEnumDefs = std.StringHashMap(EnumDef).init(allocator),
+        .useAliases = std.StringHashMap(UseAlias).init(allocator),
+        .allocatedEnumVariants = try std.ArrayList([]sig.ZSEnumVariant).initCapacity(allocator, 4),
+        .enumInits = std.AutoHashMap(usize, EnumInitInfo).init(allocator),
     };
 
     // Note: resolutions, overloadedNames, overloads, allocatedStrings, allocatedTypes,
-    // structDefs are moved into the result, not freed here
+    // structDefs, enumDefs are moved into the result, not freed here
+    defer analyzer.useAliases.deinit();
 
     var table = SymbolTable.init(allocator);
     defer table.deinit();
@@ -232,8 +272,34 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         }
     }
 
+    // Import exported enum definitions from dependencies
+    {
+        var depIter2 = deps.iterator();
+        while (depIter2.next()) |dep| {
+            var edIter = dep.value_ptr.exportedEnumDefs.iterator();
+            while (edIter.next()) |entry| {
+                if (!analyzer.enumDefs.contains(entry.key_ptr.*)) {
+                    try analyzer.enumDefs.put(entry.key_ptr.*, entry.value_ptr.*);
+                }
+            }
+        }
+    }
+
+    // Import prelude exported enum definitions
+    if (preludeEnumDefs) |ped| {
+        var iter4 = ped.iterator();
+        while (iter4.next()) |entry| {
+            if (!analyzer.enumDefs.contains(entry.key_ptr.*)) {
+                try analyzer.enumDefs.put(entry.key_ptr.*, entry.value_ptr.*);
+            }
+        }
+    }
+
     // Pre-pass: register all struct definitions
     try analyzer.registerStructs(module);
+
+    // Pre-pass: register all enum definitions
+    try analyzer.registerEnums(module);
 
     // Pre-pass: register all function overloads
     try analyzer.registerFunctions(module);
@@ -263,6 +329,10 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .structDefs = analyzer.structDefs,
         .exportedStructDefs = analyzer.exportedStructDefs,
         .fieldIndices = analyzer.fieldIndices,
+        .enumDefs = analyzer.enumDefs,
+        .exportedEnumDefs = analyzer.exportedEnumDefs,
+        .allocatedEnumVariants = analyzer.allocatedEnumVariants,
+        .enumInits = analyzer.enumInits,
     };
 }
 
@@ -293,7 +363,7 @@ fn registerFunctions(self: *Self, module: zsm.ZSModule) !void {
                     else => {},
                 }
             },
-            .import_decl, .export_from, .expr => {},
+            .import_decl, .export_from, .expr, .use_decl => {},
         }
     }
 }
@@ -397,6 +467,10 @@ fn analyzeNode(self: *Self, node: ast.ZSAstNode) !?Symbol {
             try self.analyzeExportFrom(node.export_from);
             break :b null;
         },
+        .use_decl => b: {
+            try self.analyzeUse(node.use_decl);
+            break :b null;
+        },
     };
 }
 
@@ -445,6 +519,11 @@ fn analyzeExportFrom(self: *Self, ef: ast.ZSExportFrom) !void {
                 try self.structDefs.put(localName, sd);
                 try self.exportedStructDefs.put(localName, sd);
             }
+            // Re-export enum definitions
+            if (depResult.exportedEnumDefs.get(sym.name)) |ed| {
+                try self.enumDefs.put(localName, ed);
+                try self.exportedEnumDefs.put(localName, ed);
+            }
             // Re-export overloads
             if (depResult.overloads.get(sym.name)) |entries| {
                 const gop = try self.overloads.getOrPut(localName);
@@ -473,6 +552,10 @@ fn analyzeStmt(self: *Self, stmt: ast.stmt.ZSStmt) !?Symbol {
             // Struct definitions are handled in the pre-pass (registerStructs)
             return null;
         },
+        .enum_decl => {
+            // Enum definitions are handled in the pre-pass (registerEnums)
+            return null;
+        },
     };
 }
 
@@ -493,6 +576,8 @@ fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) !Symbol.ZSType {
         .field_access => self.analyzeFieldAccess(expr.field_access),
         .array_literal => self.analyzeArrayLiteral(expr.array_literal),
         .index_access => self.analyzeIndexAccess(expr.index_access),
+        .enum_init => self.analyzeEnumInit(expr.enum_init),
+        .match_expr => self.analyzeMatchExpr(expr.match_expr),
     };
 }
 
@@ -750,6 +835,10 @@ fn analyzeBlock(self: *Self, block: ast.expr.ZSBlock) Error!Symbol.ZSType {
             .export_from => {
                 lastType = .unknown;
             },
+            .use_decl => {
+                try self.analyzeUse(node.use_decl);
+                lastType = .unknown;
+            },
         }
     }
     return lastType;
@@ -781,7 +870,7 @@ fn registerStructs(self: *Self, module: zsm.ZSModule) !void {
                     else => {},
                 }
             },
-            .import_decl, .export_from, .expr => {},
+            .import_decl, .export_from, .expr, .use_decl => {},
         }
     }
 }
@@ -802,6 +891,12 @@ fn resolveTypeAnnotationFull(self: *Self, astType: ast.ZSType) Error!Symbol.ZSTy
                     return try self.instantiateStruct(sd, &.{});
                 }
             }
+            // Check if it's a known enum type (non-generic)
+            if (self.enumDefs.get(ref)) |ed| {
+                if (ed.type_params.len == 0) {
+                    return try self.buildEnumType(ed);
+                }
+            }
             return .unknown;
         },
         .array => |a| {
@@ -818,6 +913,10 @@ fn resolveTypeAnnotationFull(self: *Self, astType: ast.ZSType) Error!Symbol.ZSTy
             // Check for generic struct
             if (self.structDefs.get(g.name)) |sd| {
                 return try self.instantiateStruct(sd, g.type_args);
+            }
+            // Check for generic enum
+            if (self.enumDefs.get(g.name)) |ed| {
+                return try self.instantiateEnum(ed, g.type_args);
             }
             return .unknown;
         },
@@ -955,6 +1054,26 @@ fn analyzeIndexAccess(self: *Self, ia: ast.expr.ZSIndexAccess) Error!Symbol.ZSTy
 }
 
 fn analyzeFieldAccess(self: *Self, fa: ast.expr.ZSFieldAccess) Error!Symbol.ZSType {
+    // Check if subject is a reference to an enum name (e.g., Option.None)
+    if (fa.subject.* == .reference) {
+        const refName = fa.subject.reference.name;
+        if (self.enumDefs.get(refName)) |ed| {
+            // This is EnumName.Variant (unit variant access)
+            for (ed.variants, 0..) |variant, i| {
+                if (std.mem.eql(u8, variant.name, fa.field)) {
+                    // Record this as an enum init for IR gen
+                    try self.enumInits.put(fa.startPos, .{
+                        .enumName = refName,
+                        .variantTag = @intCast(i),
+                    });
+                    return try self.buildEnumType(ed);
+                }
+            }
+            try self.recordError(fa, "Unknown enum variant");
+            return Symbol.ZSType.unknown;
+        }
+    }
+
     const subjectType = try self.analyzeExpr(fa.subject.*);
     return switch (subjectType) {
         .struct_type => |st| {
@@ -979,6 +1098,199 @@ fn analyzeFieldAccess(self: *Self, fa: ast.expr.ZSFieldAccess) Error!Symbol.ZSTy
             break :blk Symbol.ZSType.unknown;
         },
     };
+}
+
+fn registerEnums(self: *Self, module: zsm.ZSModule) !void {
+    for (module.ast) |node| {
+        switch (node) {
+            .stmt => {
+                switch (node.stmt) {
+                    .enum_decl => |ed| {
+                        const def = EnumDef{
+                            .name = ed.name,
+                            .type_params = ed.type_params,
+                            .variants = ed.variants,
+                        };
+                        try self.enumDefs.put(ed.name, def);
+                        if (ed.modifiers.exported != null) {
+                            try self.exportedEnumDefs.put(ed.name, def);
+                        }
+                    },
+                    else => {},
+                }
+            },
+            .import_decl, .export_from, .expr, .use_decl => {},
+        }
+    }
+}
+
+fn buildEnumType(self: *Self, ed: EnumDef) Error!Symbol.ZSType {
+    const variants = try self.allocator.alloc(sig.ZSEnumVariant, ed.variants.len);
+    try self.allocatedEnumVariants.append(self.allocator, variants);
+    for (ed.variants, 0..) |v, i| {
+        const payloadType: ?Symbol.ZSType = if (v.payload_type) |pt| try self.resolveTypeAnnotationFull(pt) else null;
+        variants[i] = .{
+            .name = v.name,
+            .payload_type = payloadType,
+            .tag = @intCast(i),
+        };
+    }
+    return Symbol.ZSType{ .enum_type = .{
+        .name = ed.name,
+        .variants = variants,
+        .type_args = &.{},
+    } };
+}
+
+fn instantiateEnum(self: *Self, ed: EnumDef, typeArgs: []const ast.type_notation.ZSType) Error!Symbol.ZSType {
+    const resolvedTypeArgs = try self.allocator.alloc(Symbol.ZSType, typeArgs.len);
+    try self.allocatedTypeSlices.append(self.allocator, resolvedTypeArgs);
+    for (typeArgs, 0..) |ta, i| {
+        resolvedTypeArgs[i] = try self.resolveTypeAnnotationFull(ta);
+    }
+
+    const variants = try self.allocator.alloc(sig.ZSEnumVariant, ed.variants.len);
+    try self.allocatedEnumVariants.append(self.allocator, variants);
+    for (ed.variants, 0..) |v, i| {
+        const payloadType: ?Symbol.ZSType = if (v.payload_type) |pt| blk: {
+            // Check if it's a type parameter
+            const ptName = pt.typeName();
+            for (ed.type_params, 0..) |param, pi| {
+                if (std.mem.eql(u8, ptName, param)) {
+                    if (pi < resolvedTypeArgs.len) break :blk resolvedTypeArgs[pi];
+                    break :blk Symbol.ZSType.unknown;
+                }
+            }
+            break :blk try self.resolveTypeAnnotationFull(pt);
+        } else null;
+        variants[i] = .{
+            .name = v.name,
+            .payload_type = payloadType,
+            .tag = @intCast(i),
+        };
+    }
+
+    return Symbol.ZSType{ .enum_type = .{
+        .name = ed.name,
+        .variants = variants,
+        .type_args = resolvedTypeArgs,
+    } };
+}
+
+fn analyzeEnumInit(self: *Self, ei: ast.expr.ZSEnumInit) Error!Symbol.ZSType {
+    const ed = self.enumDefs.get(ei.enum_name) orelse {
+        try self.recordError(ei, "Unknown enum type");
+        return Symbol.ZSType.unknown;
+    };
+
+    // Find the variant
+    var foundVariant: ?ast.stmt.ZSEnum.ZSEnumVariant = null;
+    for (ed.variants) |v| {
+        if (std.mem.eql(u8, v.name, ei.variant_name)) {
+            foundVariant = v;
+            break;
+        }
+    }
+
+    if (foundVariant == null) {
+        try self.recordError(ei, "Unknown enum variant");
+        return Symbol.ZSType.unknown;
+    }
+
+    const variant = foundVariant.?;
+
+    // Check payload
+    if (ei.payload != null and variant.payload_type == null) {
+        try self.recordError(ei, "Variant does not accept a payload");
+    } else if (ei.payload == null and variant.payload_type != null) {
+        try self.recordError(ei, "Variant requires a payload");
+    }
+
+    if (ei.payload) |p| {
+        _ = try self.analyzeExpr(p.*);
+    }
+
+    return try self.buildEnumType(ed);
+}
+
+fn analyzeMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error!Symbol.ZSType {
+    const subjectType = try self.analyzeExpr(me.subject.*);
+
+    // Subject must be an enum type
+    if (subjectType != .enum_type) {
+        try self.recordError(me, "Match subject must be an enum type");
+        return Symbol.ZSType.unknown;
+    }
+
+    const enumType = subjectType.enum_type;
+    var resultType: Symbol.ZSType = .unknown;
+
+    for (me.arms) |arm| {
+        // Verify the variant belongs to the enum
+        var foundVariant: ?sig.ZSEnumVariant = null;
+        for (enumType.variants) |v| {
+            if (std.mem.eql(u8, v.name, arm.variant_name)) {
+                foundVariant = v;
+                break;
+            }
+        }
+
+        if (foundVariant == null) {
+            try self.recordError(me, "Unknown variant in match arm");
+            continue;
+        }
+
+        const variant = foundVariant.?;
+
+        // Create a scope for the arm with the binding
+        var armScope = SymbolTable.init(self.allocator);
+        defer armScope.deinit();
+        try self.tableStack.enterScope(&armScope);
+
+        if (arm.binding) |binding| {
+            const bindingType = variant.payload_type orelse Symbol.ZSType.unknown;
+            try self.tableStack.put(.{
+                .name = binding,
+                .assignable = false,
+                .signature = bindingType,
+            });
+        }
+
+        const armType = try self.analyzeExpr(arm.body.*);
+        _ = try self.tableStack.exitScope();
+
+        if (resultType == .unknown) {
+            resultType = armType;
+        }
+    }
+
+    return resultType;
+}
+
+fn analyzeUse(self: *Self, u: ast.ZSUse) Error!void {
+    const ed = self.enumDefs.get(u.enum_name) orelse {
+        try self.recordErrorAt(u.startPos, u.endPos, "Unknown enum type in use declaration");
+        return;
+    };
+
+    for (u.variants) |variantName| {
+        // Verify the variant exists
+        var found = false;
+        for (ed.variants) |v| {
+            if (std.mem.eql(u8, v.name, variantName)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            try self.recordErrorAt(u.startPos, u.endPos, "Unknown variant in use declaration");
+            continue;
+        }
+        try self.useAliases.put(variantName, .{
+            .enum_name = u.enum_name,
+            .variant_name = variantName,
+        });
+    }
 }
 
 fn recordError(

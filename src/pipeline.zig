@@ -95,6 +95,7 @@ fn compileModule(
         &analyzeResult.resolutions,
         &analyzeResult.overloadedNames,
         &analyzeResult.fieldIndices,
+        &analyzeResult.enumInits,
         &importedVarNames,
     );
 
@@ -256,6 +257,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
     var preludeExports: ?*const @import("analyzer/symbol_table_stack.zig").SymbolTable = null;
     var preludeOverloads: ?*const std.StringHashMap(std.ArrayList(Analyzer.OverloadEntry)) = null;
     var preludeStructDefs: ?*const std.StringHashMap(Analyzer.StructDef) = null;
+    var preludeEnumDefs: ?*const std.StringHashMap(Analyzer.EnumDef) = null;
     if (try findPreludePath(allocator)) |pPath| {
         defer allocator.free(pPath);
         if (compileModule(allocator, pPath, &cache, &inProgress, &allSources, &allModules)) |preludeCompiled| {
@@ -263,6 +265,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
             preludeExports = &preludeCompiled.analyzeResult.exports;
             preludeOverloads = &preludeCompiled.analyzeResult.overloads;
             preludeStructDefs = &preludeCompiled.analyzeResult.exportedStructDefs;
+            preludeEnumDefs = &preludeCompiled.analyzeResult.exportedEnumDefs;
 
             // Map all exported symbols from prelude to IR names
             var exportIter = preludeCompiled.analyzeResult.exports.iterator();
@@ -278,7 +281,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
 
     std.debug.print("Analyzing\n", .{});
 
-    var analyzeResult = try Analyzer.analyzeWithPrelude(module, allocator, &depAnalyzeResults, preludeExports, preludeOverloads, preludeStructDefs);
+    var analyzeResult = try Analyzer.analyzeWithPrelude(module, allocator, &depAnalyzeResults, preludeExports, preludeOverloads, preludeStructDefs, preludeEnumDefs);
     defer analyzeResult.deinit(allocator);
 
     for (analyzeResult.errors) |e| {
@@ -292,6 +295,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
             &analyzeResult.resolutions,
             &analyzeResult.overloadedNames,
             &analyzeResult.fieldIndices,
+            &analyzeResult.enumInits,
             &importedVarNames,
         );
         defer entryIrResult.deinit(allocator);

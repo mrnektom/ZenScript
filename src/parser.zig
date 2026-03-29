@@ -87,6 +87,9 @@ fn nextNode(self: *Self) !?ZSAstNode {
     if (try self.nextExportFrom()) |ef| {
         return ZSAstNode{ .export_from = ef };
     }
+    if (try self.nextUse()) |u| {
+        return ZSAstNode{ .use_decl = u };
+    }
     const s = self.nextStmt() catch |err| {
         if (try self.nextExpr()) |e| {
             return ZSAstNode{ .expr = e };
@@ -220,6 +223,7 @@ fn nextStmt(self: *Self) !?ast.stmt.ZSStmt {
     if (!self.tokenizer.hasNext() and self.peekedToken == null) return null;
     const modifiers = try self.nextModifiers();
     if (try self.nextStruct(modifiers)) |s| return ast.stmt.ZSStmt{ .struct_decl = s };
+    if (try self.nextEnum(modifiers)) |e| return ast.stmt.ZSStmt{ .enum_decl = e };
     if (try self.nextVar(modifiers)) |v| return ast.stmt.ZSStmt{ .variable = v };
     if (try self.nextFn(modifiers)) |f| return ast.stmt.ZSStmt{ .function = f };
     if (try self.nextReassign()) |r| return ast.stmt.ZSStmt{ .reassign = r };
@@ -272,7 +276,7 @@ fn nextReassign(self: *Self) Error!?ast.stmt.ZSReassign {
 }
 
 fn isKeyword(value: []const u8) bool {
-    const keywords = [_][]const u8{ "if", "while", "return", "else", "let", "const", "fn", "struct", "external", "true", "false", "import", "export", "from", "as", "char" };
+    const keywords = [_][]const u8{ "if", "while", "return", "else", "let", "const", "fn", "struct", "enum", "match", "use", "external", "true", "false", "import", "export", "from", "as", "char" };
     for (keywords) |kw| {
         if (std.mem.eql(u8, value, kw)) return true;
     }
@@ -281,6 +285,7 @@ fn isKeyword(value: []const u8) bool {
 
 fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
     var expr = blk: {
+        if (try self.nextMatchExpr()) |m| break :blk ast.expr.ZSExpr{ .match_expr = m };
         if (try self.nextIfExpr()) |e| break :blk ast.expr.ZSExpr{ .if_expr = e };
         if (try self.nextWhileExpr()) |e| break :blk ast.expr.ZSExpr{ .while_expr = e };
         if (try self.nextReturn()) |r| break :blk ast.expr.ZSExpr{ .return_expr = r };
@@ -405,6 +410,50 @@ fn nextPostfixChain(self: *Self, initial: ast.expr.ZSExpr) Error!ast.expr.ZSExpr
             const fieldToken = try self.peekToken();
             if (fieldToken.type != .ident) return Error.UnexpectedTokenType;
             self.shiftToken();
+
+            // Check if this is EnumName.Variant(...) or EnumName.Variant
+            // When the subject is a simple reference, check for enum init syntax
+            if (current == .reference) {
+                if (self.checkToken("(")) {
+                    // EnumName.Variant(payload)
+                    self.shiftToken(); // consume '('
+                    var payload: ?*ast.expr.ZSExpr = null;
+                    var endPos = fieldToken.endPos;
+                    if (!self.checkToken(")")) {
+                        const payloadExpr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+                        const payloadPtr = try self.allocator.create(ast.expr.ZSExpr);
+                        payloadPtr.* = payloadExpr;
+                        payload = payloadPtr;
+                    }
+                    const closeToken = try self.peekToken();
+                    endPos = closeToken.endPos;
+                    try self.expectToken(")");
+
+                    current = ast.expr.ZSExpr{ .enum_init = .{
+                        .enum_name = current.reference.name,
+                        .variant_name = fieldToken.value,
+                        .payload = payload,
+                        .startPos = current.start(),
+                        .endPos = endPos,
+                    } };
+                    continue;
+                } else {
+                    // Could be EnumName.Variant (unit variant) or regular field access
+                    // Parser emits enum_init with null payload; analyzer validates
+                    // But we can't distinguish from field access here, so emit field_access
+                    // and let the analyzer handle it
+                    const subjectPtr = try self.allocator.create(ast.expr.ZSExpr);
+                    subjectPtr.* = current;
+
+                    current = ast.expr.ZSExpr{ .field_access = .{
+                        .subject = subjectPtr,
+                        .field = fieldToken.value,
+                        .startPos = current.start(),
+                        .endPos = fieldToken.endPos,
+                    } };
+                    continue;
+                }
+            }
 
             const subjectPtr = try self.allocator.create(ast.expr.ZSExpr);
             subjectPtr.* = current;
@@ -783,6 +832,159 @@ fn nextStruct(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSStru
         .type_params = try self.allocator.dupe([]const u8, type_params.items),
         .fields = try self.allocator.dupe(ast.stmt.ZSStruct.ZSStructField, fields.items),
         .modifiers = modifiers,
+        .startPos = startToken.startPos,
+        .endPos = endToken.endPos,
+    };
+}
+
+fn nextEnum(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSEnum {
+    if (!self.checkToken("enum")) return null;
+    const startToken = try self.peekToken();
+    self.shiftToken();
+
+    const name = try self.nextIdent();
+
+    // Parse optional type parameters: <T, U>
+    var type_params = try std.ArrayList([]const u8).initCapacity(self.allocator, 2);
+    defer type_params.deinit(self.allocator);
+    if (self.checkToken("<")) {
+        self.shiftToken();
+        while (true) {
+            const paramName = try self.nextIdent();
+            try type_params.append(self.allocator, paramName);
+            if (self.checkToken(",")) {
+                self.shiftToken();
+                continue;
+            }
+            break;
+        }
+        try self.expectToken(">");
+    }
+
+    try self.expectToken("{");
+
+    var variants = try std.ArrayList(ast.stmt.ZSEnum.ZSEnumVariant).initCapacity(self.allocator, 4);
+    defer variants.deinit(self.allocator);
+
+    while (true) {
+        if (self.checkToken("}")) break;
+        const variantName = try self.nextIdent();
+        var payload_type: ?ast.ZSType = null;
+        if (self.checkToken("(")) {
+            self.shiftToken();
+            payload_type = try self.nextTypeInner();
+            try self.expectToken(")");
+        }
+        try variants.append(self.allocator, .{ .name = variantName, .payload_type = payload_type });
+        if (self.checkToken(",")) {
+            self.shiftToken();
+            continue;
+        }
+        break;
+    }
+
+    const endToken = try self.peekToken();
+    try self.expectToken("}");
+
+    return ast.stmt.ZSEnum{
+        .name = name,
+        .type_params = try self.allocator.dupe([]const u8, type_params.items),
+        .variants = try self.allocator.dupe(ast.stmt.ZSEnum.ZSEnumVariant, variants.items),
+        .modifiers = modifiers,
+        .startPos = startToken.startPos,
+        .endPos = endToken.endPos,
+    };
+}
+
+fn nextUse(self: *Self) Error!?ast.ZSUse {
+    if (!self.checkToken("use")) return null;
+    const startToken = try self.peekToken();
+    self.shiftToken();
+
+    const enumName = try self.nextIdent();
+    try self.expectToken(".");
+    try self.expectToken("{");
+
+    var variants = try std.ArrayList([]const u8).initCapacity(self.allocator, 4);
+    defer variants.deinit(self.allocator);
+
+    while (true) {
+        if (self.checkToken("}")) break;
+        const variantName = try self.nextIdent();
+        try variants.append(self.allocator, variantName);
+        if (self.checkToken(",")) {
+            self.shiftToken();
+            continue;
+        }
+        break;
+    }
+
+    const endToken = try self.peekToken();
+    try self.expectToken("}");
+
+    return ast.ZSUse{
+        .enum_name = enumName,
+        .variants = try self.allocator.dupe([]const u8, variants.items),
+        .startPos = startToken.startPos,
+        .endPos = endToken.endPos,
+    };
+}
+
+fn nextMatchExpr(self: *Self) Error!?ast.expr.ZSMatchExpr {
+    if (!self.checkToken("match")) return null;
+    const startToken = try self.peekToken();
+    self.shiftToken();
+
+    const subject = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+    const subjectPtr = try self.allocator.create(ast.expr.ZSExpr);
+    subjectPtr.* = subject;
+
+    try self.expectToken("{");
+
+    var arms = try std.ArrayList(ast.expr.ZSMatchArm).initCapacity(self.allocator, 4);
+    defer arms.deinit(self.allocator);
+
+    while (true) {
+        if (self.checkToken("}")) break;
+
+        // Parse pattern: EnumName.VariantName or EnumName.VariantName(binding)
+        const enumName = try self.nextIdent();
+        try self.expectToken(".");
+        const variantName = try self.nextIdent();
+
+        var binding: ?[]const u8 = null;
+        if (self.checkToken("(")) {
+            self.shiftToken();
+            binding = try self.nextIdent();
+            try self.expectToken(")");
+        }
+
+        try self.expectToken("->");
+
+        const body = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+        const bodyPtr = try self.allocator.create(ast.expr.ZSExpr);
+        bodyPtr.* = body;
+
+        try arms.append(self.allocator, .{
+            .enum_name = enumName,
+            .variant_name = variantName,
+            .binding = binding,
+            .body = bodyPtr,
+        });
+
+        if (self.checkToken(",")) {
+            self.shiftToken();
+            continue;
+        }
+        break;
+    }
+
+    const endToken = try self.peekToken();
+    try self.expectToken("}");
+
+    return ast.expr.ZSMatchExpr{
+        .subject = subjectPtr,
+        .arms = try self.allocator.dupe(ast.expr.ZSMatchArm, arms.items),
         .startPos = startToken.startPos,
         .endPos = endToken.endPos,
     };

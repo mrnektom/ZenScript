@@ -2,6 +2,7 @@ const std = @import("std");
 const ir = @import("zsir.zig");
 const zsm = @import("../ast/zs_module.zig");
 const ast = @import("../ast/ast_node.zig");
+const Analyzer = @import("../analyzer/analyzer.zig");
 const Self = @This();
 
 pub const Error = error{} || std.mem.Allocator.Error || std.fmt.ParseIntError;
@@ -13,6 +14,7 @@ varNames: std.StringHashMap([]const u8),
 resolutions: *const std.AutoHashMap(usize, []const u8),
 overloadedNames: *const std.StringHashMap(void),
 fieldIndices: *const std.AutoHashMap(usize, u32),
+enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
 
 pub const IrGenResult = struct {
     instructions: ir.ZSIRInstructions,
@@ -30,8 +32,9 @@ pub fn generateIr(
     resolutions: *const std.AutoHashMap(usize, []const u8),
     overloadedNames: *const std.StringHashMap(void),
     fieldIndices: *const std.AutoHashMap(usize, u32),
+    enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
 ) !IrGenResult {
-    return generateIrWithImports(module, allocator, resolutions, overloadedNames, fieldIndices, null);
+    return generateIrWithImports(module, allocator, resolutions, overloadedNames, fieldIndices, enumInits, null);
 }
 
 pub fn generateIrWithImports(
@@ -40,6 +43,7 @@ pub fn generateIrWithImports(
     resolutions: *const std.AutoHashMap(usize, []const u8),
     overloadedNames: *const std.StringHashMap(void),
     fieldIndices: *const std.AutoHashMap(usize, u32),
+    enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
     importedVarNames: ?*const std.StringHashMap([]const u8),
 ) !IrGenResult {
     var instructions = try std.ArrayList(ir.ZSIR).initCapacity(allocator, 5);
@@ -61,6 +65,7 @@ pub fn generateIrWithImports(
         .resolutions = resolutions,
         .overloadedNames = overloadedNames,
         .fieldIndices = fieldIndices,
+        .enumInits = enumInits,
     };
 
     for (module.ast) |node| {
@@ -80,6 +85,7 @@ fn generateNode(self: *Self, node: ast.ZSAstNode) ![]const u8 {
         .expr => self.generateExpr(node.expr),
         .import_decl => |imp| try self.generateImport(imp),
         .export_from => |ef| try self.generateExportFrom(ef),
+        .use_decl => "",  // use declarations don't generate IR
     };
 }
 
@@ -106,6 +112,7 @@ fn generateStmt(self: *Self, stmt: ast.stmt.ZSStmt) ![]const u8 {
         .function => try self.generateFunction(stmt.function),
         .reassign => try self.generateReassign(stmt.reassign),
         .struct_decl => "",  // Struct declarations don't generate IR instructions
+        .enum_decl => try self.generateEnumDecl(stmt.enum_decl),
     };
 }
 
@@ -126,6 +133,8 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
         .field_access => self.generateFieldAccess(expr.field_access),
         .array_literal => self.generateArrayLiteral(expr.array_literal),
         .index_access => self.generateIndexAccess(expr.index_access),
+        .enum_init => self.generateEnumInit(expr.enum_init),
+        .match_expr => self.generateMatchExpr(expr.match_expr),
     };
 }
 
@@ -474,6 +483,18 @@ fn generateStructInit(self: *Self, si: ast.expr.ZSStructInit) Error![]const u8 {
 }
 
 fn generateFieldAccess(self: *Self, fa: ast.expr.ZSFieldAccess) Error![]const u8 {
+    // Check if this field_access is actually an enum unit variant init
+    if (self.enumInits.get(fa.startPos)) |info| {
+        const resultName = try self.generateName();
+        try self.instructions.append(self.allocator, ir.ZSIR{ .enum_init = .{
+            .resultName = resultName,
+            .enumName = info.enumName,
+            .variantTag = info.variantTag,
+            .payload = null,
+        } });
+        return resultName;
+    }
+
     const subjectName = try self.generateExpr(fa.subject.*);
     const resultName = try self.generateName();
     const fieldIndex = self.fieldIndices.get(fa.startPos) orelse 0;
@@ -531,6 +552,111 @@ fn generateIndexAccess(self: *Self, ia: ast.expr.ZSIndexAccess) Error![]const u8
         .resultName = resultName,
         .subject = subjectName,
         .index = indexName,
+    } });
+    return resultName;
+}
+
+fn generateEnumDecl(self: *Self, ed: ast.stmt.ZSEnum) Error![]const u8 {
+    const variants = try self.allocator.alloc(ir.ZSIREnumVariantDef, ed.variants.len);
+    for (ed.variants, 0..) |v, i| {
+        variants[i] = .{
+            .name = v.name,
+            .tag = @intCast(i),
+            .payloadType = if (v.payload_type) |pt| pt.typeName() else null,
+        };
+    }
+    try self.instructions.append(self.allocator, ir.ZSIR{ .enum_decl = .{
+        .name = ed.name,
+        .variants = variants,
+    } });
+    return "";
+}
+
+fn generateEnumInit(self: *Self, ei: ast.expr.ZSEnumInit) Error![]const u8 {
+    // Find the variant tag by looking up the enum declaration in previously generated enum_decl instructions
+    var variantTag: u32 = 0;
+    for (self.instructions.items) |inst| {
+        if (inst == .enum_decl and std.mem.eql(u8, inst.enum_decl.name, ei.enum_name)) {
+            for (inst.enum_decl.variants) |v| {
+                if (std.mem.eql(u8, v.name, ei.variant_name)) {
+                    variantTag = v.tag;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+
+    var payloadName: ?[]const u8 = null;
+    if (ei.payload) |p| {
+        payloadName = try self.generateExpr(p.*);
+    }
+
+    const resultName = try self.generateName();
+    try self.instructions.append(self.allocator, ir.ZSIR{ .enum_init = .{
+        .resultName = resultName,
+        .enumName = ei.enum_name,
+        .variantTag = variantTag,
+        .payload = payloadName,
+    } });
+    return resultName;
+}
+
+fn generateMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error![]const u8 {
+    const subjectName = try self.generateExpr(me.subject.*);
+
+    // Find the enum name from the first arm
+    const enumName = if (me.arms.len > 0) me.arms[0].enum_name else "";
+
+    var irArms = try self.allocator.alloc(ir.ZSIRMatchArm, me.arms.len);
+
+    for (me.arms, 0..) |arm, i| {
+        // Find tag for this variant
+        var variantTag: u32 = 0;
+        for (self.instructions.items) |inst| {
+            if (inst == .enum_decl and std.mem.eql(u8, inst.enum_decl.name, arm.enum_name)) {
+                for (inst.enum_decl.variants) |v| {
+                    if (std.mem.eql(u8, v.name, arm.variant_name)) {
+                        variantTag = v.tag;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+
+        // Generate body instructions into a separate list
+        var bodyInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
+        defer bodyInstructions.deinit(self.allocator);
+
+        const outerInstructions = self.instructions;
+        self.instructions = &bodyInstructions;
+
+        // If there's a binding, add it to varNames pointing to a generated name
+        // The codegen will extract the payload and store it with this name
+        var bindingIrName: ?[]const u8 = null;
+        if (arm.binding) |binding| {
+            bindingIrName = try self.generateName();
+            try self.varNames.put(binding, bindingIrName.?);
+        }
+
+        const armResult = try self.generateExpr(arm.body.*);
+        self.instructions = outerInstructions;
+
+        irArms[i] = .{
+            .variantTag = variantTag,
+            .binding = bindingIrName,
+            .body = try self.allocator.dupe(ir.ZSIR, bodyInstructions.items),
+            .resultName = if (armResult.len > 0) armResult else null,
+        };
+    }
+
+    const resultName = try self.generateName();
+    try self.instructions.append(self.allocator, ir.ZSIR{ .match_expr = .{
+        .resultName = resultName,
+        .subject = subjectName,
+        .enumName = enumName,
+        .arms = irArms,
     } });
     return resultName;
 }

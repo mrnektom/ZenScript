@@ -1,5 +1,5 @@
 const std = @import("std");
-const ZSIRType = enum { assign, store, call, fn_decl, fn_def, ret, branch, compare, arith, loop, module_init, struct_init, field_access, ptr_op, deref_op, array_init, index_access, index_store };
+const ZSIRType = enum { assign, store, call, fn_decl, fn_def, ret, branch, compare, arith, loop, module_init, struct_init, field_access, ptr_op, deref_op, array_init, index_access, index_store, enum_init, match_expr, enum_decl };
 
 pub const ZSIRInstructions = struct {
     instructions: []ZSIR,
@@ -28,6 +28,9 @@ pub const ZSIR = union(ZSIRType) {
     array_init: ZSIRArrayInit,
     index_access: ZSIRIndexAccess,
     index_store: ZSIRIndexStore,
+    enum_init: ZSIREnumInit,
+    match_expr: ZSIRMatch,
+    enum_decl: ZSIREnumDecl,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -49,6 +52,9 @@ pub const ZSIR = union(ZSIRType) {
             .array_init => self.array_init.deinit(allocator),
             .index_access => self.index_access.deinit(allocator),
             .index_store => self.index_store.deinit(allocator),
+            .enum_init => self.enum_init.deinit(allocator),
+            .match_expr => self.match_expr.deinit(allocator),
+            .enum_decl => self.enum_decl.deinit(allocator),
         }
     }
 
@@ -59,7 +65,7 @@ pub const ZSIR = union(ZSIRType) {
         switch (self) {
             .assign => try writer.print("{f}", .{self.assign}),
             .call => try writer.print("{f}", .{self.call}),
-            .store, .fn_decl, .fn_def, .ret, .branch, .compare, .arith, .loop, .module_init, .struct_init, .field_access, .ptr_op, .deref_op, .array_init, .index_access, .index_store => {},
+            .store, .fn_decl, .fn_def, .ret, .branch, .compare, .arith, .loop, .module_init, .struct_init, .field_access, .ptr_op, .deref_op, .array_init, .index_access, .index_store, .enum_init, .match_expr, .enum_decl => {},
         }
     }
 };
@@ -294,4 +300,54 @@ pub const ZSIRIndexStore = struct {
     value: []const u8,
 
     pub fn deinit(_: *const @This(), _: std.mem.Allocator) void {}
+};
+
+pub const ZSIREnumInit = struct {
+    resultName: []const u8,
+    enumName: []const u8,
+    variantTag: u32,
+    payload: ?[]const u8,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.resultName);
+    }
+};
+
+pub const ZSIRMatchArm = struct {
+    variantTag: u32,
+    binding: ?[]const u8,
+    body: []ZSIR,
+    resultName: ?[]const u8,
+};
+
+pub const ZSIRMatch = struct {
+    resultName: ?[]const u8,
+    subject: []const u8,
+    enumName: []const u8,
+    arms: []ZSIRMatchArm,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        if (self.resultName) |n| allocator.free(n);
+        for (self.arms) |arm| {
+            if (arm.binding) |b| allocator.free(b);
+            for (arm.body) |inst| inst.deinit(allocator);
+            allocator.free(arm.body);
+        }
+        allocator.free(self.arms);
+    }
+};
+
+pub const ZSIREnumVariantDef = struct {
+    name: []const u8,
+    tag: u32,
+    payloadType: ?[]const u8,
+};
+
+pub const ZSIREnumDecl = struct {
+    name: []const u8,
+    variants: []ZSIREnumVariantDef,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.variants);
+    }
 };

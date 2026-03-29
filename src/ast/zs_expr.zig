@@ -18,6 +18,8 @@ const ZSExprType = enum {
     field_access,
     array_literal,
     index_access,
+    enum_init,
+    match_expr,
 };
 
 pub const ZSExpr = union(ZSExprType) {
@@ -36,6 +38,8 @@ pub const ZSExpr = union(ZSExprType) {
     field_access: ZSFieldAccess,
     array_literal: ZSArrayLiteral,
     index_access: ZSIndexAccess,
+    enum_init: ZSEnumInit,
+    match_expr: ZSMatchExpr,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -50,6 +54,8 @@ pub const ZSExpr = union(ZSExprType) {
             .field_access => self.field_access.deinit(allocator),
             .array_literal => self.array_literal.deinit(allocator),
             .index_access => self.index_access.deinit(allocator),
+            .enum_init => self.enum_init.deinit(allocator),
+            .match_expr => self.match_expr.deinit(allocator),
             .number, .char, .boolean, .reference => {},
         }
     }
@@ -84,6 +90,8 @@ pub const ZSExpr = union(ZSExprType) {
             .field_access => self.field_access.startPos,
             .array_literal => self.array_literal.startPos,
             .index_access => self.index_access.startPos,
+            .enum_init => self.enum_init.startPos,
+            .match_expr => self.match_expr.startPos,
         };
     }
 
@@ -104,6 +112,8 @@ pub const ZSExpr = union(ZSExprType) {
             .field_access => self.field_access.endPos,
             .array_literal => self.array_literal.endPos,
             .index_access => self.index_access.endPos,
+            .enum_init => self.enum_init.endPos,
+            .match_expr => self.match_expr.endPos,
         };
     }
 };
@@ -268,5 +278,44 @@ pub const ZSIndexAccess = struct {
         allocator.destroy(self.subject);
         self.index.deinit(allocator);
         allocator.destroy(self.index);
+    }
+};
+
+pub const ZSEnumInit = struct {
+    enum_name: []const u8,
+    variant_name: []const u8,
+    payload: ?*ZSExpr,
+    startPos: usize,
+    endPos: usize,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        if (self.payload) |p| {
+            p.deinit(allocator);
+            allocator.destroy(p);
+        }
+    }
+};
+
+pub const ZSMatchArm = struct {
+    enum_name: []const u8,
+    variant_name: []const u8,
+    binding: ?[]const u8,
+    body: *ZSExpr,
+};
+
+pub const ZSMatchExpr = struct {
+    subject: *ZSExpr,
+    arms: []ZSMatchArm,
+    startPos: usize,
+    endPos: usize,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        self.subject.deinit(allocator);
+        allocator.destroy(self.subject);
+        for (self.arms) |*arm| {
+            arm.body.deinit(allocator);
+            allocator.destroy(arm.body);
+        }
+        allocator.free(self.arms);
     }
 };

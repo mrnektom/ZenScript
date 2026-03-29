@@ -114,6 +114,9 @@ fn generateInstruction(
         .field_access => try generateFieldAccess(builder, locals, instruction.field_access),
         .ptr_op => try generatePtrOp(builder, locals, instruction.ptr_op),
         .deref_op => {},
+        .enum_decl => try generateEnumDeclCodegen(module, instruction.enum_decl, allocator),
+        .enum_init => try generateEnumInitCodegen(builder, module, locals, instruction.enum_init, allocator),
+        .match_expr => try generateMatchCodegen(builder, module, locals, instruction.match_expr, allocator),
     }
 }
 
@@ -933,6 +936,182 @@ fn generateIndexStore(
     }
 
     _ = core.LLVMBuildStore(builder, val, gep);
+}
+
+fn generateEnumDeclCodegen(
+    module: types.LLVMModuleRef,
+    decl: ir.ZSIREnumDecl,
+    allocator: std.mem.Allocator,
+) !void {
+    _ = module;
+
+    // Find the first payload type to determine the enum struct layout: { i32_tag, payload }
+    var payloadType: ?types.LLVMTypeRef = null;
+    for (decl.variants) |v| {
+        if (v.payloadType) |pt| {
+            payloadType = mapType(pt);
+            break;
+        }
+    }
+
+    // Create a named struct type: { i32, <payload_type> }
+    const nameZ = try allocator.dupeZ(u8, decl.name);
+    defer allocator.free(nameZ);
+    const structType = core.LLVMStructCreateNamed(core.LLVMGetGlobalContext(), nameZ.ptr);
+
+    if (payloadType) |pt| {
+        var elemTypes: [2]types.LLVMTypeRef = .{ core.LLVMInt32Type(), pt };
+        core.LLVMStructSetBody(structType, &elemTypes, 2, 0);
+    } else {
+        // Enum with no payloads — just a tag
+        var elemTypes: [1]types.LLVMTypeRef = .{core.LLVMInt32Type()};
+        core.LLVMStructSetBody(structType, &elemTypes, 1, 0);
+    }
+}
+
+fn generateEnumInitCodegen(
+    builder: types.LLVMBuilderRef,
+    module: types.LLVMModuleRef,
+    locals: *std.StringHashMap(LocalVar),
+    ei: ir.ZSIREnumInit,
+    allocator: std.mem.Allocator,
+) !void {
+    _ = module;
+    const nameZ = try allocator.dupeZ(u8, ei.enumName);
+    defer allocator.free(nameZ);
+
+    // Look up the named struct type
+    var enumType = core.LLVMGetTypeByName2(core.LLVMGetGlobalContext(), nameZ.ptr);
+    if (enumType == null) {
+        // Fallback: create an anonymous type { i32, i64 }
+        var elemTypes: [2]types.LLVMTypeRef = .{ core.LLVMInt32Type(), core.LLVMInt64Type() };
+        enumType = core.LLVMStructType(&elemTypes, 2, 0);
+    }
+
+    // Build the enum value
+    var enumVal = core.LLVMGetUndef(enumType.?);
+    // Set tag
+    enumVal = core.LLVMBuildInsertValue(builder, enumVal, core.LLVMConstInt(core.LLVMInt32Type(), @intCast(ei.variantTag), 0), 0, "withtag");
+
+    // Set payload if present
+    if (ei.payload) |payloadName| {
+        if (locals.get(payloadName)) |payloadLocal| {
+            const payloadVal = core.LLVMBuildLoad2(builder, payloadLocal.ty, payloadLocal.ptr, "payload");
+            // May need to cast payload to the expected type
+            const expectedType = core.LLVMStructGetTypeAtIndex(enumType.?, 1);
+            const expectedKind = core.LLVMGetTypeKind(expectedType);
+            const actualKind = core.LLVMGetTypeKind(payloadLocal.ty);
+
+            var castVal = payloadVal;
+            if (expectedKind == .LLVMIntegerTypeKind and actualKind == .LLVMIntegerTypeKind) {
+                const expectedWidth = core.LLVMGetIntTypeWidth(expectedType);
+                const actualWidth = core.LLVMGetIntTypeWidth(payloadLocal.ty);
+                if (actualWidth < expectedWidth) {
+                    castVal = core.LLVMBuildSExt(builder, payloadVal, expectedType, "payext");
+                } else if (actualWidth > expectedWidth) {
+                    castVal = core.LLVMBuildTrunc(builder, payloadVal, expectedType, "paytrunc");
+                }
+            }
+            enumVal = core.LLVMBuildInsertValue(builder, enumVal, castVal, 1, "withpayload");
+        }
+    }
+
+    // Store the enum value
+    const ptr = core.LLVMBuildAlloca(builder, enumType.?, "enuminit");
+    _ = core.LLVMBuildStore(builder, enumVal, ptr);
+    try locals.put(ei.resultName, LocalVar{ .ptr = ptr, .ty = enumType.? });
+}
+
+fn generateMatchCodegen(
+    builder: types.LLVMBuilderRef,
+    module: types.LLVMModuleRef,
+    locals: *std.StringHashMap(LocalVar),
+    me: ir.ZSIRMatch,
+    allocator: std.mem.Allocator,
+) !void {
+    const subjectLocal = locals.get(me.subject) orelse return;
+    const subjectVal = core.LLVMBuildLoad2(builder, subjectLocal.ty, subjectLocal.ptr, "matchsub");
+
+    // Extract the tag
+    const tag = core.LLVMBuildExtractValue(builder, subjectVal, 0, "tag");
+
+    // Get the current function for creating basic blocks
+    const currentBlock = core.LLVMGetInsertBlock(builder);
+    const func = core.LLVMGetBasicBlockParent(currentBlock);
+
+    // Create blocks for each arm and a merge block
+    const mergeBlock = core.LLVMAppendBasicBlock(func, "match_end");
+    const defaultBlock = core.LLVMAppendBasicBlock(func, "match_default");
+
+    // Position default block: unreachable (match is exhaustive)
+    core.LLVMPositionBuilderAtEnd(builder, defaultBlock);
+    _ = core.LLVMBuildUnreachable(builder);
+
+    // Build switch instruction
+    core.LLVMPositionBuilderAtEnd(builder, currentBlock);
+    const switchInst = core.LLVMBuildSwitch(builder, tag, defaultBlock, @intCast(me.arms.len));
+
+    // Track results from each arm for the phi node
+    var armResults: [16]types.LLVMValueRef = undefined;
+    var armBlocks: [16]types.LLVMBasicBlockRef = undefined;
+    var armCount: u32 = 0;
+    var resultType: types.LLVMTypeRef = core.LLVMInt32Type(); // default
+
+    for (me.arms) |arm| {
+        const armNameZ = try std.fmt.allocPrint(allocator, "arm_{}\x00", .{arm.variantTag});
+        defer allocator.free(armNameZ);
+        const armBlock = core.LLVMAppendBasicBlock(func, @ptrCast(armNameZ.ptr));
+
+        // Add case to switch
+        core.LLVMAddCase(switchInst, core.LLVMConstInt(core.LLVMInt32Type(), @intCast(arm.variantTag), 0), armBlock);
+
+        // Generate arm body
+        core.LLVMPositionBuilderAtEnd(builder, armBlock);
+
+        // If there's a binding, extract the payload and store it under the binding IR name
+        if (arm.binding) |bindingName| {
+            const numFields = core.LLVMCountStructElementTypes(subjectLocal.ty);
+            if (numFields > 1) {
+                const payload = core.LLVMBuildExtractValue(builder, subjectVal, 1, "arm_payload");
+                const payloadType = core.LLVMTypeOf(payload);
+                const payloadPtr = core.LLVMBuildAlloca(builder, payloadType, "binding_ptr");
+                _ = core.LLVMBuildStore(builder, payload, payloadPtr);
+                try locals.put(bindingName, LocalVar{ .ptr = payloadPtr, .ty = payloadType });
+            }
+        }
+
+        // Execute arm body instructions
+        for (arm.body) |bodyInst| {
+            try generateInstruction(builder, module, locals, &bodyInst, allocator);
+        }
+
+        // Get arm result
+        if (arm.resultName) |resultName| {
+            if (locals.get(resultName)) |resultLocal| {
+                const resultVal = core.LLVMBuildLoad2(builder, resultLocal.ty, resultLocal.ptr, "armresult");
+                armResults[armCount] = resultVal;
+                armBlocks[armCount] = core.LLVMGetInsertBlock(builder);
+                resultType = resultLocal.ty;
+                armCount += 1;
+            }
+        }
+
+        _ = core.LLVMBuildBr(builder, mergeBlock);
+    }
+
+    // Position at merge block and create phi
+    core.LLVMPositionBuilderAtEnd(builder, mergeBlock);
+
+    if (me.resultName) |resultName| {
+        if (armCount > 0) {
+            const phi = core.LLVMBuildPhi(builder, resultType, "matchresult");
+            core.LLVMAddIncoming(phi, &armResults, &armBlocks, armCount);
+
+            const resultPtr = core.LLVMBuildAlloca(builder, resultType, "matchres");
+            _ = core.LLVMBuildStore(builder, phi, resultPtr);
+            try locals.put(resultName, LocalVar{ .ptr = resultPtr, .ty = resultType });
+        }
+    }
 }
 
 fn mapType(name: []const u8) types.LLVMTypeRef {

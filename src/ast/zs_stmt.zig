@@ -3,6 +3,7 @@ pub const ZSVar = @import("zs_stmt_var.zig");
 pub const ZSFn = @import("zs_stmt_fn.zig");
 pub const ZSReassign = @import("zs_stmt_reassign.zig");
 pub const ZSStruct = @import("zs_stmt_struct.zig");
+pub const ZSEnum = @import("zs_stmt_enum.zig");
 
 pub const VarType = ZSVar.VariableType;
 
@@ -11,6 +12,7 @@ pub const ZSStmtType = enum {
     function,
     reassign,
     struct_decl,
+    enum_decl,
 };
 
 pub const ZSStmt = union(ZSStmtType) {
@@ -18,6 +20,7 @@ pub const ZSStmt = union(ZSStmtType) {
     function: ZSFn,
     reassign: ZSReassign,
     struct_decl: ZSStruct,
+    enum_decl: ZSEnum,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -30,6 +33,7 @@ pub const ZSStmt = union(ZSStmtType) {
             },
             .reassign => self.reassign.deinit(allocator),
             .struct_decl => self.struct_decl.deinit(allocator),
+            .enum_decl => self.enum_decl.deinit(allocator),
         }
     }
 };
