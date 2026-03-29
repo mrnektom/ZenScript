@@ -194,10 +194,8 @@ The `stdlib/` directory is auto-imported as a prelude. It provides:
 
 Low-level intrinsics available for systems programming:
 - `__syscall3(nr, arg1, arg2, arg3): number` — Linux syscall
-- `__ptr_to_int(s: String): number` — pointer to integer
+- `__ptr_to_int(s: String): number` — pointer to integer (also accepts `Pointer<T>`)
 - `__str_len(s: String): number` — string length
-- `__alloc_buf(size: number): number` — stack-allocate buffer
-- `__write_byte(addr: number, byte: number): void` — write byte at address
 - `__read_line(): String` — read line from stdin
 
 ## Compilation pipeline

@@ -112,7 +112,7 @@ fn generateInstruction(
         // Struct/pointer instructions — stubs for future implementation
         .struct_init => {},
         .field_access => {},
-        .ptr_op => {},
+        .ptr_op => try generatePtrOp(builder, locals, instruction.ptr_op),
         .deref_op => {},
     }
 }
@@ -687,14 +687,6 @@ fn generateCall(
         try generateStrLen(builder, locals, call);
         return;
     }
-    if (std.mem.eql(u8, call.fnName, "__alloc_buf")) {
-        try generateAllocBuf(builder, locals, call);
-        return;
-    }
-    if (std.mem.eql(u8, call.fnName, "__write_byte")) {
-        try generateWriteByte(builder, locals, call);
-        return;
-    }
     if (std.mem.eql(u8, call.fnName, "__read_line")) {
         try generateReadLine(builder, module, locals, call, allocator);
         return;
@@ -794,16 +786,24 @@ fn generatePtrToInt(
     if (call.argNames.len != 1) return;
 
     if (locals.get(call.argNames[0])) |local| {
-        const strStruct = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "str");
-        // ZSString = { i32 len, i8* ptr }, extract ptr at index 1
-        const strPtr = core.LLVMBuildExtractValue(builder, strStruct, 1, "strptr");
-        // Use i64 to preserve full 64-bit pointer on x86_64
         const i64Type = core.LLVMInt64Type();
-        const ptrInt = core.LLVMBuildPtrToInt(builder, strPtr, i64Type, "ptrint");
 
-        const ptr = core.LLVMBuildAlloca(builder, i64Type, "ptrintres");
-        _ = core.LLVMBuildStore(builder, ptrInt, ptr);
-        try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = i64Type });
+        if (core.LLVMGetTypeKind(local.ty) == .LLVMPointerTypeKind) {
+            // Pointer type: load the pointer, then PtrToInt
+            const ptrVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "ptrval");
+            const ptrInt = core.LLVMBuildPtrToInt(builder, ptrVal, i64Type, "ptrint");
+            const res = core.LLVMBuildAlloca(builder, i64Type, "ptrintres");
+            _ = core.LLVMBuildStore(builder, ptrInt, res);
+            try locals.put(call.resultName, LocalVar{ .ptr = res, .ty = i64Type });
+        } else {
+            // String struct: extract ptr field at index 1
+            const strStruct = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "str");
+            const strPtr = core.LLVMBuildExtractValue(builder, strStruct, 1, "strptr");
+            const ptrInt = core.LLVMBuildPtrToInt(builder, strPtr, i64Type, "ptrint");
+            const ptr = core.LLVMBuildAlloca(builder, i64Type, "ptrintres");
+            _ = core.LLVMBuildStore(builder, ptrInt, ptr);
+            try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = i64Type });
+        }
     }
 }
 
@@ -825,79 +825,32 @@ fn generateStrLen(
     }
 }
 
-fn generateAllocBuf(
+fn generatePtrOp(
     builder: types.LLVMBuilderRef,
     locals: *std.StringHashMap(LocalVar),
-    call: ir.ZSIRCall,
+    op: ir.ZSIRPtrOp,
 ) !void {
-    if (call.argNames.len != 1) return;
+    const operand = locals.get(op.operand) orelse return;
+    const ptrType = core.LLVMPointerType(core.LLVMInt8Type(), 0);
 
-    const i32Type = core.LLVMInt32Type();
-    const i64Type = core.LLVMInt64Type();
-    const i8Type = core.LLVMInt8Type();
+    var resultPtr: types.LLVMValueRef = undefined;
 
-    // Load size argument
-    var sizeVal: types.LLVMValueRef = undefined;
-    if (locals.get(call.argNames[0])) |local| {
-        sizeVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "bufsize");
+    if (core.LLVMGetTypeKind(operand.ty) == .LLVMArrayTypeKind) {
+        // Array: GEP to get pointer to first element
+        var indices: [2]types.LLVMValueRef = .{
+            core.LLVMConstInt(core.LLVMInt32Type(), 0, 0),
+            core.LLVMConstInt(core.LLVMInt32Type(), 0, 0),
+        };
+        resultPtr = core.LLVMBuildGEP2(builder, operand.ty, operand.ptr, &indices, 2, "arrptr");
     } else {
-        return;
+        // Scalar: the alloca itself is already a pointer
+        resultPtr = operand.ptr;
     }
 
-    // Stack-allocate size bytes
-    const buf = core.LLVMBuildArrayAlloca(builder, i8Type, sizeVal, "allocbuf");
-
-    // Convert pointer to i64
-    const addr = core.LLVMBuildPtrToInt(builder, buf, i64Type, "bufaddr");
-
-    // Store result as i64
-    const ptr = core.LLVMBuildAlloca(builder, i64Type, "allocres");
-    _ = core.LLVMBuildStore(builder, addr, ptr);
-    try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = i64Type });
-
-    _ = i32Type;
-}
-
-fn generateWriteByte(
-    builder: types.LLVMBuilderRef,
-    locals: *std.StringHashMap(LocalVar),
-    call: ir.ZSIRCall,
-) !void {
-    if (call.argNames.len != 2) return;
-
-    const i64Type = core.LLVMInt64Type();
-    const i8Type = core.LLVMInt8Type();
-
-    // Load addr argument
-    var addrVal: types.LLVMValueRef = undefined;
-    if (locals.get(call.argNames[0])) |local| {
-        addrVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "wbaddr");
-        // If it's i32, extend to i64
-        if (core.LLVMGetTypeKind(local.ty) == .LLVMIntegerTypeKind and
-            core.LLVMGetIntTypeWidth(local.ty) != 64)
-        {
-            addrVal = core.LLVMBuildSExt(builder, addrVal, i64Type, "wbaddr64");
-        }
-    } else {
-        return;
-    }
-
-    // Load byte argument
-    var byteVal: types.LLVMValueRef = undefined;
-    if (locals.get(call.argNames[1])) |local| {
-        byteVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "wbbyte");
-    } else {
-        return;
-    }
-
-    // Convert addr (i64) to i8*
-    const addrPtr = core.LLVMBuildIntToPtr(builder, addrVal, core.LLVMPointerType(i8Type, 0), "wbptr");
-
-    // Truncate byte value to i8
-    const byteTrunc = core.LLVMBuildTrunc(builder, byteVal, i8Type, "wbbyte8");
-
-    // Store byte at address
-    _ = core.LLVMBuildStore(builder, byteTrunc, addrPtr);
+    // Store the pointer into an alloca so it can be loaded later
+    const alloca = core.LLVMBuildAlloca(builder, ptrType, "ptrop");
+    _ = core.LLVMBuildStore(builder, resultPtr, alloca);
+    try locals.put(op.resultName, LocalVar{ .ptr = alloca, .ty = ptrType });
 }
 
 fn generateReadLine(
@@ -1042,13 +995,26 @@ fn generateIndexStore(
 
     const indexVal = core.LLVMBuildLoad2(builder, indexLocal.ty, indexLocal.ptr, "stidx");
     const arrType = subjectLocal.ty;
+    const elemType = core.LLVMGetElementType(arrType);
 
     var indices: [2]types.LLVMValueRef = .{
         core.LLVMConstInt(core.LLVMInt32Type(), 0, 0),
         indexVal,
     };
     const gep = core.LLVMBuildGEP2(builder, arrType, subjectLocal.ptr, &indices, 2, "stgep");
-    const val = core.LLVMBuildLoad2(builder, valueLocal.ty, valueLocal.ptr, "stval");
+    var val = core.LLVMBuildLoad2(builder, valueLocal.ty, valueLocal.ptr, "stval");
+
+    // Auto-trunc if value is wider than element type (e.g. i32 -> i8 for char arrays)
+    if (core.LLVMGetTypeKind(valueLocal.ty) == .LLVMIntegerTypeKind and
+        core.LLVMGetTypeKind(elemType) == .LLVMIntegerTypeKind)
+    {
+        const valWidth = core.LLVMGetIntTypeWidth(valueLocal.ty);
+        const elemWidth = core.LLVMGetIntTypeWidth(elemType);
+        if (valWidth > elemWidth) {
+            val = core.LLVMBuildTrunc(builder, val, elemType, "sttrunc");
+        }
+    }
+
     _ = core.LLVMBuildStore(builder, val, gep);
 }
 

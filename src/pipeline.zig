@@ -120,16 +120,16 @@ fn mergeIr(
     var merged = try std.ArrayList(ir.ZSIR).initCapacity(allocator, 32);
     defer merged.deinit(allocator);
 
-    // Add all dependency instructions first
+    // Add all dependency instructions first (skip module_init — deps are already inlined)
     for (depModules) |dep| {
         for (dep.irResult.instructions.instructions) |inst| {
+            if (inst == .module_init) continue;
             try merged.append(allocator, inst);
         }
     }
 
-    // Add entry module instructions
+    // Add entry module instructions (skip module_init — deps are already inlined)
     for (entryIr.instructions) |inst| {
-        // Skip module_init instructions — deps are already inlined
         if (inst == .module_init) continue;
         try merged.append(allocator, inst);
     }

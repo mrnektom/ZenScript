@@ -172,9 +172,16 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
     // Register intrinsics
     try analyzer.registerIntrinsic(allocator, "__syscall3", &.{ "number", "number", "number", "number" }, .number);
     try analyzer.registerIntrinsic(allocator, "__ptr_to_int", &.{"String"}, .number);
+    // Add pointer overload for __ptr_to_int
+    {
+        const argTypes2 = try allocator.alloc([]const u8, 1);
+        try analyzer.allocatedSliceLists.append(allocator, argTypes2);
+        argTypes2[0] = "pointer";
+        if (analyzer.overloads.getPtr("__ptr_to_int")) |entries| {
+            try entries.append(allocator, .{ .argTypes = argTypes2, .mangledName = "__ptr_to_int", .retType = .number, .external = true });
+        }
+    }
     try analyzer.registerIntrinsic(allocator, "__str_len", &.{"String"}, .number);
-    try analyzer.registerIntrinsic(allocator, "__alloc_buf", &.{"number"}, .number);
-    try analyzer.registerIntrinsic(allocator, "__write_byte", &.{ "number", "number" }, .unknown);
     try analyzer.registerIntrinsic(allocator, "__read_line", &.{}, getStringStructTypeStatic());
 
     // Inject prelude exports into scope
