@@ -45,14 +45,39 @@ fn process(x: string): string = x
 
 ### Types
 
-Supported types: `number`, `string`, `boolean`, `void`.
+Supported types: `number`, `boolean`, `void`, and user-defined structs.
 
 Type annotations are used on function arguments and return types:
 
 ```zs
-fn greet(name: string): string = name
 fn check(x: number): boolean = true
+fn greet(name: String): void = print(name)
 ```
+
+### Structs
+
+```zs
+struct Point { x: number, y: number }
+
+// Generic structs
+struct Pair<T, U> { first: T, second: U }
+
+// Struct init and field access
+let p = Point { x: 10, y: 20 }
+let v = p.x
+
+// Export structs for use in other modules
+export struct String { len: number, data: Pointer<number> }
+```
+
+### Pointers
+
+```zs
+let px = ptr(val)      // create a pointer
+let v = deref(px)      // dereference a pointer
+```
+
+Generic pointer type annotation: `Pointer<number>`.
 
 ### Expressions
 
@@ -64,16 +89,32 @@ true
 false
 
 // Function calls
-print_number(10)
+print(greeting)
 add(1, 2)
 
-// Binary operators (== and !=)
+// Arithmetic operators
+x + y
+x - y
+x * y
+x / y
+x % y
+
+// Comparison operators
 x == 10
 x != 0
+x > 0
+x < 100
+x >= 1
+x <= 99
 
 // If/else (optional parentheses around condition)
 if x == 10 { return 1 } else { return 0 }
 if (condition) expr1 else expr2
+
+// While loops
+while (val > 0) {
+    val = val - 1
+}
 
 // Blocks
 {
@@ -93,21 +134,54 @@ return
 // lib.zs
 export fn get_ten(): number = 10
 export let x = 42
+export struct Point { x: number, y: number }
 
 // main.zs
 import { get_ten, x as y } from "./lib.zs"
-print_number(get_ten())
-print_number(y)
+print(get_ten())
+```
+
+Re-export symbols from another module:
+
+```zs
+// prelude.zs
+export { String } from "./string.zs"
+export fn print(s: String): void { ... }
 ```
 
 Features:
 - Named imports with aliasing (`as`)
+- `export { ... } from "..."` for re-exporting (import + export in one statement)
+- Only `export struct` is visible to dependent modules
 - Paths resolved relative to the importing file
 - Circular import detection
 - Recursive dependency compilation
 
+### Standard library
+
+The `stdlib/` directory is auto-imported as a prelude. It provides:
+- `print(s: String): void` — print a string
+- `print(n: number): void` — print a number (overloaded)
+- `read_line(): String` — read a line from stdin
+- `String` struct (re-exported from `string.zs`)
+
+### Intrinsics
+
+Low-level intrinsics available for systems programming:
+- `__syscall3(nr, arg1, arg2, arg3): number` — Linux syscall
+- `__ptr_to_int(s: String): number` — pointer to integer
+- `__str_len(s: String): number` — string length
+- `__alloc_buf(size: number): number` — stack-allocate buffer
+- `__write_byte(addr: number, byte: number): void` — write byte at address
+- `__read_line(): String` — read line from stdin
+
 ## Compilation pipeline
 
 ```
-.zs source → Tokenizer → Parser → Analyzer → IRGen → LLVMCodeGen → MCJIT execution
+.zs source → Tokenizer → Parser → Analyzer → IRGen → LLVMCodeGen → MCJIT / executable
 ```
+
+Compilation modes:
+- `-r` — JIT execution via MCJIT
+- `-o <path>` — compile to native executable (via LLVM object file + linker)
+- `-dump-ir` — dump LLVM IR to stdout
