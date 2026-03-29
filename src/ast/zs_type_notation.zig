@@ -1,14 +1,16 @@
 const std = @import("std");
 
-pub const ZSTypeType = enum { reference, generic };
+pub const ZSTypeType = enum { reference, generic, array };
 
 pub const ZSType = union(ZSTypeType) {
     reference: []const u8,
     generic: ZSGenericType,
+    array: ZSArrayType,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         switch (self.*) {
             .generic => |g| g.deinit(allocator),
+            .array => |a| a.deinit(allocator),
             .reference => {},
         }
     }
@@ -18,6 +20,7 @@ pub const ZSType = union(ZSTypeType) {
         return switch (self) {
             .reference => |ref| ref,
             .generic => |g| g.name,
+            .array => |a| a.element_type.typeName(),
         };
     }
 };
@@ -31,6 +34,15 @@ pub const ZSGenericType = struct {
             arg.deinit(allocator);
         }
         allocator.free(self.type_args);
+    }
+};
+
+pub const ZSArrayType = struct {
+    element_type: *ZSType,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        self.element_type.deinit(allocator);
+        allocator.destroy(self.element_type);
     }
 };
 

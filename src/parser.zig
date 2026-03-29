@@ -240,11 +240,28 @@ fn nextReassign(self: *Self) Error!?ast.stmt.ZSReassign {
     const name = token.value;
     self.shiftToken();
 
+    // Check for indexed assignment: name[index] = expr
+    if (self.checkToken("[")) {
+        self.shiftToken(); // consume '['
+        const indexExpr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+        try self.expectToken("]");
+        if (self.checkToken("=")) {
+            self.shiftToken();
+            const expr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+            return ast.stmt.ZSReassign{ .target = .{ .index = .{ .subject_name = name, .index = indexExpr } }, .expr = expr };
+        }
+        // Backtrack
+        self.peekedToken = savedPeeked;
+        self.tokenizer.position = savedPos;
+        self.tokenizer.line = savedLine;
+        return null;
+    }
+
     // Check for '='
     if (self.checkToken("=")) {
         self.shiftToken();
         const expr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
-        return ast.stmt.ZSReassign{ .name = name, .expr = expr };
+        return ast.stmt.ZSReassign{ .target = .{ .name = name }, .expr = expr };
     }
 
     // Backtrack — not a reassignment
@@ -255,7 +272,7 @@ fn nextReassign(self: *Self) Error!?ast.stmt.ZSReassign {
 }
 
 fn isKeyword(value: []const u8) bool {
-    const keywords = [_][]const u8{ "if", "while", "return", "else", "let", "const", "fn", "struct", "external", "true", "false", "import", "export", "from", "as" };
+    const keywords = [_][]const u8{ "if", "while", "return", "else", "let", "const", "fn", "struct", "external", "true", "false", "import", "export", "from", "as", "char" };
     for (keywords) |kw| {
         if (std.mem.eql(u8, value, kw)) return true;
     }
@@ -268,7 +285,9 @@ fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
         if (try self.nextWhileExpr()) |e| break :blk ast.expr.ZSExpr{ .while_expr = e };
         if (try self.nextReturn()) |r| break :blk ast.expr.ZSExpr{ .return_expr = r };
         if (try self.nextBlock()) |b| break :blk ast.expr.ZSExpr{ .block = b };
+        if (try self.nextArrayLiteral()) |a| break :blk ast.expr.ZSExpr{ .array_literal = a };
         if (try self.nextNumber()) |n| break :blk ast.expr.ZSExpr{ .number = n };
+        if (try self.nextCharLiteral()) |c| break :blk ast.expr.ZSExpr{ .char = c };
         if (try self.nextBoolean()) |b| break :blk ast.expr.ZSExpr{ .boolean = b };
         if (try self.nextReference()) |r| {
             // Check for struct init: Name { field: value, ... }
@@ -279,14 +298,14 @@ fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
         return null;
     };
 
-    // Check for field access chain: expr.field.field...
-    expr = try self.nextFieldAccessChain(expr);
+    // Check for field access and index access chain
+    expr = try self.nextPostfixChain(expr);
 
     // Check for call
     if (try self.nextCall(expr)) |call| {
         var callExpr = ast.expr.ZSExpr{ .call = call };
-        // Check for field access after call
-        callExpr = try self.nextFieldAccessChain(callExpr);
+        // Check for postfix after call
+        callExpr = try self.nextPostfixChain(callExpr);
         // Check for binary op after call
         if (try self.nextBinaryRhs(callExpr)) |bin| {
             return ast.expr.ZSExpr{ .binary = bin };
@@ -378,25 +397,100 @@ fn nextStructInit(self: *Self, ref: ast.expr.ZSReference) Error!?ast.expr.ZSStru
     };
 }
 
-fn nextFieldAccessChain(self: *Self, initial: ast.expr.ZSExpr) Error!ast.expr.ZSExpr {
+fn nextPostfixChain(self: *Self, initial: ast.expr.ZSExpr) Error!ast.expr.ZSExpr {
     var current = initial;
-    while (self.checkToken(".")) {
-        self.shiftToken();
-        const fieldToken = try self.peekToken();
-        if (fieldToken.type != .ident) return Error.UnexpectedTokenType;
-        self.shiftToken();
+    while (true) {
+        if (self.checkToken(".")) {
+            self.shiftToken();
+            const fieldToken = try self.peekToken();
+            if (fieldToken.type != .ident) return Error.UnexpectedTokenType;
+            self.shiftToken();
 
-        const subjectPtr = try self.allocator.create(ast.expr.ZSExpr);
-        subjectPtr.* = current;
+            const subjectPtr = try self.allocator.create(ast.expr.ZSExpr);
+            subjectPtr.* = current;
 
-        current = ast.expr.ZSExpr{ .field_access = .{
-            .subject = subjectPtr,
-            .field = fieldToken.value,
-            .startPos = current.start(),
-            .endPos = fieldToken.endPos,
-        } };
+            current = ast.expr.ZSExpr{ .field_access = .{
+                .subject = subjectPtr,
+                .field = fieldToken.value,
+                .startPos = current.start(),
+                .endPos = fieldToken.endPos,
+            } };
+        } else if (self.checkToken("[")) {
+            self.shiftToken(); // consume '['
+            const indexExpr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+            const endToken = try self.peekToken();
+            try self.expectToken("]");
+
+            const subjectPtr = try self.allocator.create(ast.expr.ZSExpr);
+            subjectPtr.* = current;
+            const indexPtr = try self.allocator.create(ast.expr.ZSExpr);
+            indexPtr.* = indexExpr;
+
+            current = ast.expr.ZSExpr{ .index_access = .{
+                .subject = subjectPtr,
+                .index = indexPtr,
+                .startPos = current.start(),
+                .endPos = endToken.endPos,
+            } };
+        } else {
+            break;
+        }
     }
     return current;
+}
+
+fn nextCharLiteral(self: *Self) Error!?ast.expr.ZSChar {
+    const token = self.peekToken() catch return null;
+    if (token.type != .char_literal) return null;
+    self.shiftToken();
+
+    const raw = token.value; // e.g., 'a' or '\n'
+    // Strip surrounding quotes
+    const inner = raw[1 .. raw.len - 1];
+    const value: u8 = if (inner.len == 2 and inner[0] == '\\') switch (inner[1]) {
+        'n' => '\n',
+        't' => '\t',
+        'r' => '\r',
+        '\\' => '\\',
+        '\'' => '\'',
+        '0' => 0,
+        else => inner[1],
+    } else inner[0];
+
+    return ast.expr.ZSChar{
+        .value = value,
+        .startPos = token.startPos,
+        .endPos = token.endPos,
+    };
+}
+
+fn nextArrayLiteral(self: *Self) Error!?ast.expr.ZSArrayLiteral {
+    if (!self.checkToken("[")) return null;
+    const startToken = try self.peekToken();
+    self.shiftToken(); // consume '['
+
+    var elements = try std.ArrayList(ast.expr.ZSExpr).initCapacity(self.allocator, 4);
+    defer elements.deinit(self.allocator);
+
+    while (true) {
+        if (self.checkToken("]")) break;
+        const elem = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+        try elements.append(self.allocator, elem);
+        if (self.checkToken(",")) {
+            self.shiftToken();
+            continue;
+        }
+        break;
+    }
+
+    const endToken = try self.peekToken();
+    try self.expectToken("]");
+
+    return ast.expr.ZSArrayLiteral{
+        .elements = try self.allocator.dupe(ast.expr.ZSExpr, elements.items),
+        .startPos = startToken.startPos,
+        .endPos = endToken.endPos,
+    };
 }
 
 fn nextBinaryRhs(self: *Self, lhs: ast.expr.ZSExpr) Error!?ast.expr.ZSBinary {
@@ -685,6 +779,16 @@ fn nextType(self: *Self) !?ast.ZSType {
 }
 
 fn nextTypeInner(self: *Self) !ast.ZSType {
+    // Check for array type: [elementType]
+    if (self.checkToken("[")) {
+        self.shiftToken(); // consume '['
+        const elemType = try self.nextTypeInner();
+        try self.expectToken("]");
+        const elemPtr = try self.allocator.create(ast.type_notation.ZSType);
+        elemPtr.* = elemType;
+        return ast.ZSType{ .array = .{ .element_type = elemPtr } };
+    }
+
     const typeName = try self.nextIdent();
 
     // Check for generic type args: Name<T, U>

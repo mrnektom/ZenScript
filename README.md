@@ -45,13 +45,14 @@ fn process(x: string): string = x
 
 ### Types
 
-Supported types: `number`, `boolean`, `void`, and user-defined structs.
+Supported types: `number`, `char`, `boolean`, `void`, arrays, and user-defined structs.
 
 Type annotations are used on function arguments and return types:
 
 ```zs
 fn check(x: number): boolean = true
 fn greet(name: String): void = print(name)
+fn first(arr: [number]): number = arr[0]
 ```
 
 ### Structs
@@ -79,12 +80,36 @@ let v = deref(px)      // dereference a pointer
 
 Generic pointer type annotation: `Pointer<number>`.
 
+### Char
+
+```zs
+let c = 'a'
+let newline = '\n'
+let zero = '\0'
+```
+
+Char is an 8-bit value (`i8` in LLVM). Supported escapes: `\n`, `\t`, `\r`, `\\`, `\'`, `\0`.
+
+### Arrays
+
+```zs
+let arr = [1, 2, 3]
+let first = arr[0]       // index access
+arr[1] = 42              // indexed assignment (let only)
+let len = arr.length     // array length
+
+let chars = ['h', 'i']   // array of char
+```
+
+Arrays are fixed-size and stack-allocated (`alloca [N x T]` in LLVM). Array type annotation: `[number]`, `[char]`.
+
 ### Expressions
 
 ```zs
 // Literals
 42
 "hello"
+'a'
 true
 false
 

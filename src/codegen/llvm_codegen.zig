@@ -106,6 +106,9 @@ fn generateInstruction(
         .arith => try generateArith(builder, locals, instruction.arith, allocator),
         .loop => try generateLoop(builder, module, locals, instruction.loop, allocator),
         .module_init => try generateModuleInit(builder, module, instruction.module_init, allocator),
+        .array_init => try generateArrayInit(builder, locals, instruction.array_init),
+        .index_access => try generateIndexAccess(builder, locals, instruction.index_access),
+        .index_store => generateIndexStore(builder, locals, instruction.index_store),
         // Struct/pointer instructions — stubs for future implementation
         .struct_init => {},
         .field_access => {},
@@ -567,6 +570,7 @@ fn generateAssign(builder: types.LLVMBuilderRef, locals: *std.StringHashMap(Loca
         .number => core.LLVMInt32Type(),
         .string => getStringType(),
         .boolean => core.LLVMInt1Type(),
+        .char => core.LLVMInt8Type(),
     };
 
     const value = try getValue(builder, &assign.value);
@@ -977,9 +981,82 @@ fn generateReadLine(
     try locals.put(call.resultName, LocalVar{ .ptr = strPtr, .ty = strType });
 }
 
+fn generateArrayInit(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    arrayInit: ir.ZSIRArrayInit,
+) !void {
+    const elemType = mapType(arrayInit.elementType);
+    const count: c_uint = @intCast(arrayInit.elements.len);
+    const arrType = core.LLVMArrayType(elemType, count);
+    const arrPtr = core.LLVMBuildAlloca(builder, arrType, "arr");
+
+    // Store each element via GEP
+    for (arrayInit.elements, 0..) |elemName, i| {
+        if (locals.get(elemName)) |local| {
+            const val = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "elem");
+            var indices: [2]types.LLVMValueRef = .{
+                core.LLVMConstInt(core.LLVMInt32Type(), 0, 0),
+                core.LLVMConstInt(core.LLVMInt32Type(), @intCast(i), 0),
+            };
+            const gep = core.LLVMBuildGEP2(builder, arrType, arrPtr, &indices, 2, "gep");
+            _ = core.LLVMBuildStore(builder, val, gep);
+        }
+    }
+
+    try locals.put(arrayInit.resultName, LocalVar{ .ptr = arrPtr, .ty = arrType });
+}
+
+fn generateIndexAccess(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    ia: ir.ZSIRIndexAccess,
+) !void {
+    const subjectLocal = locals.get(ia.subject) orelse return;
+    const indexLocal = locals.get(ia.index) orelse return;
+
+    const indexVal = core.LLVMBuildLoad2(builder, indexLocal.ty, indexLocal.ptr, "idx");
+    const arrType = subjectLocal.ty;
+    const elemType = core.LLVMGetElementType(arrType);
+
+    var indices: [2]types.LLVMValueRef = .{
+        core.LLVMConstInt(core.LLVMInt32Type(), 0, 0),
+        indexVal,
+    };
+    const gep = core.LLVMBuildGEP2(builder, arrType, subjectLocal.ptr, &indices, 2, "idxgep");
+    const val = core.LLVMBuildLoad2(builder, elemType, gep, "idxval");
+
+    const resPtr = core.LLVMBuildAlloca(builder, elemType, "idxres");
+    _ = core.LLVMBuildStore(builder, val, resPtr);
+    try locals.put(ia.resultName, LocalVar{ .ptr = resPtr, .ty = elemType });
+}
+
+fn generateIndexStore(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    istor: ir.ZSIRIndexStore,
+) void {
+    const subjectLocal = locals.get(istor.subject) orelse return;
+    const indexLocal = locals.get(istor.index) orelse return;
+    const valueLocal = locals.get(istor.value) orelse return;
+
+    const indexVal = core.LLVMBuildLoad2(builder, indexLocal.ty, indexLocal.ptr, "stidx");
+    const arrType = subjectLocal.ty;
+
+    var indices: [2]types.LLVMValueRef = .{
+        core.LLVMConstInt(core.LLVMInt32Type(), 0, 0),
+        indexVal,
+    };
+    const gep = core.LLVMBuildGEP2(builder, arrType, subjectLocal.ptr, &indices, 2, "stgep");
+    const val = core.LLVMBuildLoad2(builder, valueLocal.ty, valueLocal.ptr, "stval");
+    _ = core.LLVMBuildStore(builder, val, gep);
+}
+
 fn mapType(name: []const u8) types.LLVMTypeRef {
     if (std.mem.eql(u8, name, "number")) {
         return core.LLVMInt32Type();
+    } else if (std.mem.eql(u8, name, "char")) {
+        return core.LLVMInt8Type();
     } else if (std.mem.eql(u8, name, "boolean")) {
         return core.LLVMInt1Type();
     } else if (std.mem.eql(u8, name, "String")) {
@@ -1007,6 +1084,7 @@ fn getValue(builder: types.LLVMBuilderRef, value: *const ir.ZSIRValue) !types.LL
         .number => core.LLVMConstInt(core.LLVMInt32Type(), @intCast(value.number), 1),
         .string => getStringValue(builder, value.string),
         .boolean => core.LLVMConstInt(core.LLVMInt1Type(), if (value.boolean) 1 else 0, 0),
+        .char => core.LLVMConstInt(core.LLVMInt8Type(), @intCast(value.char), 0),
     };
 }
 

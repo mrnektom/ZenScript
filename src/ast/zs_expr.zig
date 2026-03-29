@@ -5,6 +5,7 @@ const ast_node = @import("ast_node.zig");
 const ZSExprType = enum {
     number,
     string,
+    char,
     boolean,
     call,
     reference,
@@ -15,11 +16,14 @@ const ZSExprType = enum {
     return_expr,
     struct_init,
     field_access,
+    array_literal,
+    index_access,
 };
 
 pub const ZSExpr = union(ZSExprType) {
     number: ZSNumber,
     string: ZSString,
+    char: ZSChar,
     boolean: ZSBoolean,
     call: ZSCall,
     reference: ZSReference,
@@ -30,6 +34,8 @@ pub const ZSExpr = union(ZSExprType) {
     return_expr: ZSReturn,
     struct_init: ZSStructInit,
     field_access: ZSFieldAccess,
+    array_literal: ZSArrayLiteral,
+    index_access: ZSIndexAccess,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -42,7 +48,9 @@ pub const ZSExpr = union(ZSExprType) {
             .return_expr => self.return_expr.deinit(allocator),
             .struct_init => self.struct_init.deinit(allocator),
             .field_access => self.field_access.deinit(allocator),
-            .number, .boolean, .reference => {},
+            .array_literal => self.array_literal.deinit(allocator),
+            .index_access => self.index_access.deinit(allocator),
+            .number, .char, .boolean, .reference => {},
         }
     }
 
@@ -50,6 +58,7 @@ pub const ZSExpr = union(ZSExprType) {
         return switch (self.*) {
             .number => self.number.startPos,
             .string => self.string.startPos,
+            .char => self.char.startPos,
             .boolean => self.boolean.startPos,
             .call => self.call.startPos,
             .reference => self.reference.startPos,
@@ -60,6 +69,8 @@ pub const ZSExpr = union(ZSExprType) {
             .return_expr => self.return_expr.startPos,
             .struct_init => self.struct_init.startPos,
             .field_access => self.field_access.startPos,
+            .array_literal => self.array_literal.startPos,
+            .index_access => self.index_access.startPos,
         };
     }
 
@@ -67,6 +78,7 @@ pub const ZSExpr = union(ZSExprType) {
         return switch (self.*) {
             .number => self.number.endPos,
             .string => self.string.endPos,
+            .char => self.char.endPos,
             .boolean => self.boolean.endPos,
             .call => self.call.endPos,
             .reference => self.reference.endPos,
@@ -77,6 +89,8 @@ pub const ZSExpr = union(ZSExprType) {
             .return_expr => self.return_expr.endPos,
             .struct_init => self.struct_init.endPos,
             .field_access => self.field_access.endPos,
+            .array_literal => self.array_literal.endPos,
+            .index_access => self.index_access.endPos,
         };
     }
 };
@@ -208,5 +222,38 @@ pub const ZSFieldAccess = struct {
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         self.subject.deinit(allocator);
         allocator.destroy(self.subject);
+    }
+};
+
+pub const ZSChar = struct {
+    value: u8,
+    startPos: usize,
+    endPos: usize,
+};
+
+pub const ZSArrayLiteral = struct {
+    elements: []ZSExpr,
+    startPos: usize,
+    endPos: usize,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        for (self.elements) |*elem| {
+            elem.deinit(allocator);
+        }
+        allocator.free(self.elements);
+    }
+};
+
+pub const ZSIndexAccess = struct {
+    subject: *ZSExpr,
+    index: *ZSExpr,
+    startPos: usize,
+    endPos: usize,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        self.subject.deinit(allocator);
+        allocator.destroy(self.subject);
+        self.index.deinit(allocator);
+        allocator.destroy(self.index);
     }
 };

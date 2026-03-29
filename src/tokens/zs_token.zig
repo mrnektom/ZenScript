@@ -6,6 +6,7 @@ pub const TokenType = enum {
     punctuation,
     numeric,
     string,
+    char_literal,
     eof,
 };
 

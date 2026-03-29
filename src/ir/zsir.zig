@@ -1,5 +1,5 @@
 const std = @import("std");
-const ZSIRType = enum { assign, store, call, fn_decl, fn_def, ret, branch, compare, arith, loop, module_init, struct_init, field_access, ptr_op, deref_op };
+const ZSIRType = enum { assign, store, call, fn_decl, fn_def, ret, branch, compare, arith, loop, module_init, struct_init, field_access, ptr_op, deref_op, array_init, index_access, index_store };
 
 pub const ZSIRInstructions = struct {
     instructions: []ZSIR,
@@ -25,6 +25,9 @@ pub const ZSIR = union(ZSIRType) {
     field_access: ZSIRFieldAccess,
     ptr_op: ZSIRPtrOp,
     deref_op: ZSIRDerefOp,
+    array_init: ZSIRArrayInit,
+    index_access: ZSIRIndexAccess,
+    index_store: ZSIRIndexStore,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -43,6 +46,9 @@ pub const ZSIR = union(ZSIRType) {
             .field_access => self.field_access.deinit(allocator),
             .ptr_op => self.ptr_op.deinit(allocator),
             .deref_op => self.deref_op.deinit(allocator),
+            .array_init => self.array_init.deinit(allocator),
+            .index_access => self.index_access.deinit(allocator),
+            .index_store => self.index_store.deinit(allocator),
         }
     }
 
@@ -53,16 +59,17 @@ pub const ZSIR = union(ZSIRType) {
         switch (self) {
             .assign => try writer.print("{f}", .{self.assign}),
             .call => try writer.print("{f}", .{self.call}),
-            .store, .fn_decl, .fn_def, .ret, .branch, .compare, .arith, .loop, .module_init, .struct_init, .field_access, .ptr_op, .deref_op => {},
+            .store, .fn_decl, .fn_def, .ret, .branch, .compare, .arith, .loop, .module_init, .struct_init, .field_access, .ptr_op, .deref_op, .array_init, .index_access, .index_store => {},
         }
     }
 };
 
-const ZSIRValueType = enum { number, string, boolean };
+const ZSIRValueType = enum { number, string, boolean, char };
 pub const ZSIRValue = union(ZSIRValueType) {
     number: i32,
     string: [:0]const u8,
     boolean: bool,
+    char: u8,
 
     pub fn format(
         self: @This(),
@@ -71,6 +78,7 @@ pub const ZSIRValue = union(ZSIRValueType) {
         const value = switch (self) {
             .number => self.number,
             .string => self.string,
+            .char, .boolean => return,
         };
         try writer.print("{s}", .{value});
     }
@@ -256,4 +264,33 @@ pub const ZSIRDerefOp = struct {
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         allocator.free(self.resultName);
     }
+};
+
+pub const ZSIRArrayInit = struct {
+    resultName: []const u8,
+    elementType: []const u8,
+    elements: []const []const u8,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.resultName);
+        allocator.free(self.elements);
+    }
+};
+
+pub const ZSIRIndexAccess = struct {
+    resultName: []const u8,
+    subject: []const u8,
+    index: []const u8,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.resultName);
+    }
+};
+
+pub const ZSIRIndexStore = struct {
+    subject: []const u8,
+    index: []const u8,
+    value: []const u8,
+
+    pub fn deinit(_: *const @This(), _: std.mem.Allocator) void {}
 };

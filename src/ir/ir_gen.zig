@@ -109,6 +109,7 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
     return switch (expr) {
         .number => self.generateNumberAssign(expr.number),
         .string => self.generateStringAssign(expr.string),
+        .char => self.generateCharAssign(expr.char),
         .boolean => self.generateBooleanAssign(expr.boolean),
         .call => self.generateCallOrIntrinsic(expr.call),
         .reference => self.generateReference(expr.reference),
@@ -119,6 +120,8 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
         .return_expr => self.generateReturn(expr.return_expr),
         .struct_init => self.generateStructInit(expr.struct_init),
         .field_access => self.generateFieldAccess(expr.field_access),
+        .array_literal => self.generateArrayLiteral(expr.array_literal),
+        .index_access => self.generateIndexAccess(expr.index_access),
     };
 }
 
@@ -188,18 +191,34 @@ fn generateVariable(self: *Self, variable: ast.stmt.ZSVar) ![]const u8 {
 
 fn generateReassign(self: *Self, reassign: ast.stmt.ZSReassign) ![]const u8 {
     const irName = try self.generateExpr(reassign.expr);
-    // Get the existing IR name for this variable
-    const existingName = self.varNames.get(reassign.name) orelse reassign.name;
-    // Emit a store instruction to update the existing variable's alloca
-    try self.instructions.append(
-        self.allocator,
-        ir.ZSIR{
-            .store = ir.ZSIRStore{
-                .target = existingName,
-                .value = irName,
-            },
+    switch (reassign.target) {
+        .name => |name| {
+            const existingName = self.varNames.get(name) orelse name;
+            try self.instructions.append(
+                self.allocator,
+                ir.ZSIR{
+                    .store = ir.ZSIRStore{
+                        .target = existingName,
+                        .value = irName,
+                    },
+                },
+            );
         },
-    );
+        .index => |idx| {
+            const subjectName = self.varNames.get(idx.subject_name) orelse idx.subject_name;
+            const indexName = try self.generateExpr(idx.index);
+            try self.instructions.append(
+                self.allocator,
+                ir.ZSIR{
+                    .index_store = ir.ZSIRIndexStore{
+                        .subject = subjectName,
+                        .index = indexName,
+                        .value = irName,
+                    },
+                },
+            );
+        },
+    }
     return irName;
 }
 
@@ -471,6 +490,43 @@ fn generateStringAssign(self: *Self, string: ast.expr.ZSString) Error![]const u8
 
 fn generateBooleanAssign(self: *Self, boolean: ast.expr.ZSBoolean) Error![]const u8 {
     return self.generateAssign(ir.ZSIRValue{ .boolean = boolean.value });
+}
+
+fn generateCharAssign(self: *Self, char: ast.expr.ZSChar) Error![]const u8 {
+    return self.generateAssign(ir.ZSIRValue{ .char = char.value });
+}
+
+fn generateArrayLiteral(self: *Self, al: ast.expr.ZSArrayLiteral) Error![]const u8 {
+    const elements = try self.allocator.alloc([]const u8, al.elements.len);
+    for (al.elements, 0..) |elem, i| {
+        elements[i] = try self.generateExpr(elem);
+    }
+    // Determine element type from first element (default "number")
+    const elemType: []const u8 = if (al.elements.len > 0) switch (al.elements[0]) {
+        .char => "char",
+        .string => "String",
+        .boolean => "boolean",
+        else => "number",
+    } else "number";
+    const resultName = try self.generateName();
+    try self.instructions.append(self.allocator, ir.ZSIR{ .array_init = .{
+        .resultName = resultName,
+        .elementType = elemType,
+        .elements = elements,
+    } });
+    return resultName;
+}
+
+fn generateIndexAccess(self: *Self, ia: ast.expr.ZSIndexAccess) Error![]const u8 {
+    const subjectName = try self.generateExpr(ia.subject.*);
+    const indexName = try self.generateExpr(ia.index.*);
+    const resultName = try self.generateName();
+    try self.instructions.append(self.allocator, ir.ZSIR{ .index_access = .{
+        .resultName = resultName,
+        .subject = subjectName,
+        .index = indexName,
+    } });
+    return resultName;
 }
 
 fn generateAssign(self: *Self, value: ir.ZSIRValue) Error![]const u8 {

@@ -39,8 +39,10 @@ fn currentTokenType(self: *Tokenizer) Error!?TokenType {
     return switch (firstChar) {
         '=', '!' => .punctuation,
         '(', ')', ':', '{', '}', ',', '.' => .punctuation,
+        '[', ']' => .punctuation,
         '+', '-', '*', '/', '%', '>', '<' => .punctuation,
         '"' => .string,
+        '\'' => .char_literal,
         else => e: {
             if (std.ascii.isDigit(firstChar)) {
                 break :e TokenType.numeric;
@@ -96,6 +98,34 @@ fn eatString(self: *Tokenizer) !void {
     return Error.UnexpectedEndOfInput;
 }
 
+fn eatCharLiteral(self: *Tokenizer) !void {
+    // consume opening '
+    if (self.peek() == '\'') self.shift();
+
+    // consume character (with escape support)
+    if (self.peek()) |c| {
+        if (c == '\\') {
+            self.shift(); // consume backslash
+            if (self.peek()) |_| {
+                self.shift(); // consume escape char
+            } else {
+                return Error.UnexpectedEndOfInput;
+            }
+        } else {
+            self.shift(); // consume normal char
+        }
+    } else {
+        return Error.UnexpectedEndOfInput;
+    }
+
+    // consume closing '
+    if (self.peek() == '\'') {
+        self.shift();
+    } else {
+        return Error.UnexpectedEndOfInput;
+    }
+}
+
 fn eatPunc(self: *Tokenizer) void {
     switch (self.peek() orelse return) {
         '=' => {
@@ -114,7 +144,7 @@ fn eatPunc(self: *Tokenizer) void {
             self.shift();
             if (self.peek() == @as(u8, '=')) self.shift();
         },
-        '(', ')', ':', '{', '}', ',', '.', '+', '-', '*', '/', '%' => self.shift(),
+        '(', ')', ':', '{', '}', ',', '.', '+', '-', '*', '/', '%', '[', ']' => self.shift(),
 
         else => {},
     }
@@ -130,6 +160,7 @@ pub fn next(self: *Tokenizer) Error!?ZSToken {
         .ident => self.eatIdent(),
         .numeric => self.eatNumeric(),
         .string => try self.eatString(),
+        .char_literal => try self.eatCharLiteral(),
         .punctuation => self.eatPunc(),
         .whitespace => self.skipWhitespace(),
     }

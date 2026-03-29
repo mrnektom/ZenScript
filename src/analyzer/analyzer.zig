@@ -110,10 +110,12 @@ fn typeToString(zsType: Symbol.ZSType) []const u8 {
     return switch (zsType) {
         .number => "number",
         .boolean => "boolean",
+        .char => "char",
         .function => "function",
         .unknown => "unknown",
         .struct_type => |st| st.name,
         .pointer => "pointer",
+        .array_type => "array",
     };
 }
 
@@ -347,9 +349,14 @@ fn resolveTypeAnnotation(ret: ?ast.ZSType) Symbol.ZSType {
 }
 
 fn resolveTypeInner(r: ast.ZSType) Symbol.ZSType {
+    switch (r) {
+        .array => return .unknown, // array types need full resolution
+        .reference, .generic => {},
+    }
     const name = r.typeName();
     if (std.mem.eql(u8, name, "number")) return .number;
     if (std.mem.eql(u8, name, "boolean")) return .boolean;
+    if (std.mem.eql(u8, name, "char")) return .char;
     // Note: Pointer<T>, String, and other struct types are resolved
     // during analysis with access to structDefs (see resolveTypeAnnotationFull)
     return .unknown;
@@ -458,6 +465,7 @@ fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) !Symbol.ZSType {
     return switch (expr) {
         .number => Symbol.ZSType.number,
         .string => try self.getStringStructType(),
+        .char => Symbol.ZSType.char,
         .boolean => Symbol.ZSType.boolean,
         .call => self.analyzeCall(expr.call),
         .reference => self.analyzeReference(expr.reference),
@@ -468,6 +476,8 @@ fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) !Symbol.ZSType {
         .return_expr => self.analyzeReturn(expr.return_expr),
         .struct_init => self.analyzeStructInit(expr.struct_init),
         .field_access => self.analyzeFieldAccess(expr.field_access),
+        .array_literal => self.analyzeArrayLiteral(expr.array_literal),
+        .index_access => self.analyzeIndexAccess(expr.index_access),
     };
 }
 
@@ -482,14 +492,30 @@ fn analyzeVariable(self: *Self, variable: ast.stmt.ZSVar) !Symbol {
 
 fn analyzeReassign(self: *Self, reassign: ast.stmt.ZSReassign) !void {
     _ = try self.analyzeExpr(reassign.expr);
-    const nameStart = @intFromPtr(reassign.name.ptr) - @intFromPtr(self.module.source.ptr);
-    const nameEnd = nameStart + reassign.name.len;
-    if (self.tableStack.get(reassign.name)) |sym| {
-        if (!sym.assignable) {
-            try self.recordErrorAt(nameStart, nameEnd, "Cannot reassign const variable");
-        }
-    } else {
-        try self.recordErrorAt(nameStart, nameEnd, "Reference not found");
+    switch (reassign.target) {
+        .name => |name| {
+            const nameStart = @intFromPtr(name.ptr) - @intFromPtr(self.module.source.ptr);
+            const nameEnd = nameStart + name.len;
+            if (self.tableStack.get(name)) |sym| {
+                if (!sym.assignable) {
+                    try self.recordErrorAt(nameStart, nameEnd, "Cannot reassign const variable");
+                }
+            } else {
+                try self.recordErrorAt(nameStart, nameEnd, "Reference not found");
+            }
+        },
+        .index => |idx| {
+            const nameStart = @intFromPtr(idx.subject_name.ptr) - @intFromPtr(self.module.source.ptr);
+            const nameEnd = nameStart + idx.subject_name.len;
+            if (self.tableStack.get(idx.subject_name)) |sym| {
+                if (!sym.assignable) {
+                    try self.recordErrorAt(nameStart, nameEnd, "Cannot reassign const variable");
+                }
+            } else {
+                try self.recordErrorAt(nameStart, nameEnd, "Reference not found");
+            }
+            _ = try self.analyzeExpr(idx.index);
+        },
     }
 }
 
@@ -749,6 +775,7 @@ fn resolveTypeAnnotationFull(self: *Self, astType: ast.ZSType) !Symbol.ZSType {
         .reference => |ref| {
             if (std.mem.eql(u8, ref, "number")) return .number;
             if (std.mem.eql(u8, ref, "boolean")) return .boolean;
+            if (std.mem.eql(u8, ref, "char")) return .char;
             // Check if it's a known struct type (non-generic)
             if (self.structDefs.get(ref)) |sd| {
                 if (sd.type_params.len == 0) {
@@ -756,6 +783,13 @@ fn resolveTypeAnnotationFull(self: *Self, astType: ast.ZSType) !Symbol.ZSType {
                 }
             }
             return .unknown;
+        },
+        .array => |a| {
+            const elemType = try self.resolveTypeAnnotationFull(a.element_type.*);
+            const elemPtr = try self.allocator.create(Symbol.ZSType);
+            elemPtr.* = elemType;
+            try self.allocatedTypes.append(self.allocator, elemPtr);
+            return Symbol.ZSType{ .array_type = .{ .element_type = elemPtr, .size = 0 } };
         },
         .generic => |g| {
             if (std.mem.eql(u8, g.name, "Pointer")) {
@@ -882,6 +916,29 @@ fn analyzeStructInit(self: *Self, si: ast.expr.ZSStructInit) Error!Symbol.ZSType
     } };
 }
 
+fn analyzeArrayLiteral(self: *Self, al: ast.expr.ZSArrayLiteral) Error!Symbol.ZSType {
+    var elemType: Symbol.ZSType = .unknown;
+    for (al.elements) |elem| {
+        elemType = try self.analyzeExpr(elem);
+    }
+    const elemPtr = try self.allocator.create(Symbol.ZSType);
+    elemPtr.* = elemType;
+    try self.allocatedTypes.append(self.allocator, elemPtr);
+    return Symbol.ZSType{ .array_type = .{ .element_type = elemPtr, .size = al.elements.len } };
+}
+
+fn analyzeIndexAccess(self: *Self, ia: ast.expr.ZSIndexAccess) Error!Symbol.ZSType {
+    const subjectType = try self.analyzeExpr(ia.subject.*);
+    _ = try self.analyzeExpr(ia.index.*);
+    return switch (subjectType) {
+        .array_type => |at| at.element_type.*,
+        else => blk: {
+            try self.recordError(ia, "Index access on non-array type");
+            break :blk Symbol.ZSType.unknown;
+        },
+    };
+}
+
 fn analyzeFieldAccess(self: *Self, fa: ast.expr.ZSFieldAccess) Error!Symbol.ZSType {
     const subjectType = try self.analyzeExpr(fa.subject.*);
     return switch (subjectType) {
@@ -892,6 +949,13 @@ fn analyzeFieldAccess(self: *Self, fa: ast.expr.ZSFieldAccess) Error!Symbol.ZSTy
                 }
             }
             try self.recordError(fa, "Field not found in struct");
+            return Symbol.ZSType.unknown;
+        },
+        .array_type => {
+            if (std.mem.eql(u8, fa.field, "length")) {
+                return Symbol.ZSType.number;
+            }
+            try self.recordError(fa, "Unknown array field");
             return Symbol.ZSType.unknown;
         },
         else => blk: {
