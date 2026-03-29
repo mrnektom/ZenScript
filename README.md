@@ -159,6 +159,15 @@ x < 100
 x >= 1
 x <= 99
 
+// Logical operators
+a && b       // logical AND (short-circuit)
+a || b       // logical OR (short-circuit)
+!a           // logical NOT
+
+// Negative literals
+let n = -42
+let m = -3.14
+
 // If/else (optional parentheses around condition)
 if x == 10 { return 1 } else { return 0 }
 if (condition) expr1 else expr2
@@ -166,6 +175,18 @@ if (condition) expr1 else expr2
 // While loops
 while (val > 0) {
     val = val - 1
+}
+
+// For loops (C-style)
+for (let i = 0; i < 10; i = i + 1) {
+    print(i)
+}
+
+// Break and continue
+for (let i = 0; i < 10; i = i + 1) {
+    if (i == 7) break
+    if (i == 3) continue
+    print(i)
 }
 
 // Blocks
@@ -216,11 +237,15 @@ The `stdlib/` directory is auto-imported as a prelude. It provides:
 - `print(n: number): void` — print a number (overloaded)
 - `read_line(): String` — read a line from stdin
 - `String` struct (re-exported from `string.zs`)
+- `alloc(size: number): Pointer<number>` — heap allocation
+- `free(ptr: Pointer<number>): void` — heap deallocation
 
 ### Intrinsics
 
 Low-level intrinsics available for systems programming:
-- `__syscall3(nr, arg1, arg2, arg3): number` — Linux syscall
+- `__syscall2(nr, arg1, arg2): number` — Linux syscall (2 args)
+- `__syscall3(nr, arg1, arg2, arg3): number` — Linux syscall (3 args)
+- `__syscall6(nr, a1, a2, a3, a4, a5, a6): number` — Linux syscall (6 args)
 
 ## Compilation pipeline
 
