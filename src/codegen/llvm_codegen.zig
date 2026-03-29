@@ -622,10 +622,12 @@ fn generateCall(
     if (std.mem.eql(u8, call.fnName, "load_library")) {
         if (call.argNames.len > 0) {
             if (locals.get(call.argNames[0])) |local| {
-                // local is a ZSString struct {i32, i8*}; extract len and ptr fields
+                // local is a ZSString struct {i32, i64}; extract len and data fields
                 const strStruct = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "str");
                 const strLen = core.LLVMBuildExtractValue(builder, strStruct, 0, "strlen");
-                const strPtr = core.LLVMBuildExtractValue(builder, strStruct, 1, "strptr");
+                const strData = core.LLVMBuildExtractValue(builder, strStruct, 1, "strdata");
+                // Convert i64 back to pointer for memcpy
+                const strPtr = core.LLVMBuildIntToPtr(builder, strData, core.LLVMPointerType(core.LLVMInt8Type(), 0), "strptr");
 
                 // dlopen needs a null-terminated string; allocate len+1 bytes, copy, add \0
                 const i8Type = core.LLVMInt8Type();
@@ -677,10 +679,6 @@ fn generateCall(
     // Handle intrinsics
     if (std.mem.eql(u8, call.fnName, "__syscall3")) {
         try generateSyscall3(builder, locals, call);
-        return;
-    }
-    if (std.mem.eql(u8, call.fnName, "__ptr_to_int")) {
-        try generatePtrToInt(builder, locals, call);
         return;
     }
     if (std.mem.eql(u8, call.fnName, "__read_line")) {
@@ -774,35 +772,6 @@ fn generateSyscall3(
     try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = i32Type });
 }
 
-fn generatePtrToInt(
-    builder: types.LLVMBuilderRef,
-    locals: *std.StringHashMap(LocalVar),
-    call: ir.ZSIRCall,
-) !void {
-    if (call.argNames.len != 1) return;
-
-    if (locals.get(call.argNames[0])) |local| {
-        const i64Type = core.LLVMInt64Type();
-
-        if (core.LLVMGetTypeKind(local.ty) == .LLVMPointerTypeKind) {
-            // Pointer type: load the pointer, then PtrToInt
-            const ptrVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "ptrval");
-            const ptrInt = core.LLVMBuildPtrToInt(builder, ptrVal, i64Type, "ptrint");
-            const res = core.LLVMBuildAlloca(builder, i64Type, "ptrintres");
-            _ = core.LLVMBuildStore(builder, ptrInt, res);
-            try locals.put(call.resultName, LocalVar{ .ptr = res, .ty = i64Type });
-        } else {
-            // String struct: extract ptr field at index 1
-            const strStruct = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "str");
-            const strPtr = core.LLVMBuildExtractValue(builder, strStruct, 1, "strptr");
-            const ptrInt = core.LLVMBuildPtrToInt(builder, strPtr, i64Type, "ptrint");
-            const ptr = core.LLVMBuildAlloca(builder, i64Type, "ptrintres");
-            _ = core.LLVMBuildStore(builder, ptrInt, ptr);
-            try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = i64Type });
-        }
-    }
-}
-
 fn generateFieldAccess(
     builder: types.LLVMBuilderRef,
     locals: *std.StringHashMap(LocalVar),
@@ -835,9 +804,9 @@ fn generatePtrOp(
     op: ir.ZSIRPtrOp,
 ) !void {
     const operand = locals.get(op.operand) orelse return;
-    const ptrType = core.LLVMPointerType(core.LLVMInt8Type(), 0);
+    const i64Type = core.LLVMInt64Type();
 
-    var resultPtr: types.LLVMValueRef = undefined;
+    var rawPtr: types.LLVMValueRef = undefined;
 
     if (core.LLVMGetTypeKind(operand.ty) == .LLVMArrayTypeKind) {
         // Array: GEP to get pointer to first element
@@ -845,16 +814,17 @@ fn generatePtrOp(
             core.LLVMConstInt(core.LLVMInt32Type(), 0, 0),
             core.LLVMConstInt(core.LLVMInt32Type(), 0, 0),
         };
-        resultPtr = core.LLVMBuildGEP2(builder, operand.ty, operand.ptr, &indices, 2, "arrptr");
+        rawPtr = core.LLVMBuildGEP2(builder, operand.ty, operand.ptr, &indices, 2, "arrptr");
     } else {
         // Scalar: the alloca itself is already a pointer
-        resultPtr = operand.ptr;
+        rawPtr = operand.ptr;
     }
 
-    // Store the pointer into an alloca so it can be loaded later
-    const alloca = core.LLVMBuildAlloca(builder, ptrType, "ptrop");
-    _ = core.LLVMBuildStore(builder, resultPtr, alloca);
-    try locals.put(op.resultName, LocalVar{ .ptr = alloca, .ty = ptrType });
+    // Convert pointer to i64
+    const ptrInt = core.LLVMBuildPtrToInt(builder, rawPtr, i64Type, "ptrint");
+    const alloca = core.LLVMBuildAlloca(builder, i64Type, "ptrop");
+    _ = core.LLVMBuildStore(builder, ptrInt, alloca);
+    try locals.put(op.resultName, LocalVar{ .ptr = alloca, .ty = i64Type });
 }
 
 fn generateReadLine(
@@ -870,7 +840,6 @@ fn generateReadLine(
     const i32Type = core.LLVMInt32Type();
     const i64Type = core.LLVMInt64Type();
     const i8Type = core.LLVMInt8Type();
-    const ptrType = core.LLVMPointerType(i8Type, 0);
 
     // Allocate 1024-byte buffer on stack
     const bufSize = core.LLVMConstInt(i32Type, 1024, 0);
@@ -927,13 +896,13 @@ fn generateReadLine(
 
     bytesRead = phi;
 
-    // Create ZSString struct { i32 len, i8* ptr }
+    // Create ZSString struct { i32 len, i64 data }
     const strType = getStringType();
     const strPtr = core.LLVMBuildAlloca(builder, strType, "readstr");
     var strVal = core.LLVMGetUndef(strType);
     strVal = core.LLVMBuildInsertValue(builder, strVal, bytesRead, 0, "withlen");
-    const bufAsPtr = core.LLVMBuildBitCast(builder, buf, ptrType, "bufptr");
-    strVal = core.LLVMBuildInsertValue(builder, strVal, bufAsPtr, 1, "withptr");
+    const bufAsInt = core.LLVMBuildPtrToInt(builder, buf, i64Type, "bufint2");
+    strVal = core.LLVMBuildInsertValue(builder, strVal, bufAsInt, 1, "withdata");
     _ = core.LLVMBuildStore(builder, strVal, strPtr);
     try locals.put(call.resultName, LocalVar{ .ptr = strPtr, .ty = strType });
 }
@@ -1023,8 +992,14 @@ fn generateIndexStore(
 }
 
 fn mapType(name: []const u8) types.LLVMTypeRef {
-    if (std.mem.eql(u8, name, "number")) {
+    if (std.mem.eql(u8, name, "number") or std.mem.eql(u8, name, "int")) {
         return core.LLVMInt32Type();
+    } else if (std.mem.eql(u8, name, "long")) {
+        return core.LLVMInt64Type();
+    } else if (std.mem.eql(u8, name, "short")) {
+        return core.LLVMInt16Type();
+    } else if (std.mem.eql(u8, name, "byte")) {
+        return core.LLVMInt8Type();
     } else if (std.mem.eql(u8, name, "char")) {
         return core.LLVMInt8Type();
     } else if (std.mem.eql(u8, name, "boolean")) {
@@ -1034,8 +1009,7 @@ fn mapType(name: []const u8) types.LLVMTypeRef {
     } else if (std.mem.eql(u8, name, "c_string")) {
         return core.LLVMPointerType(core.LLVMInt8Type(), 0);
     } else if (std.mem.eql(u8, name, "pointer")) {
-        // Generic pointer type (opaque ptr)
-        return core.LLVMPointerType(core.LLVMInt8Type(), 0);
+        return core.LLVMInt64Type();
     } else if (std.mem.eql(u8, name, "void")) {
         return core.LLVMVoidType();
     } else {
@@ -1045,7 +1019,7 @@ fn mapType(name: []const u8) types.LLVMTypeRef {
 }
 
 fn getStringType() types.LLVMTypeRef {
-    var elems: [2]types.LLVMTypeRef = [_]types.LLVMTypeRef{ core.LLVMInt32Type(), core.LLVMPointerType(core.LLVMInt8Type(), 0) };
+    var elems: [2]types.LLVMTypeRef = [_]types.LLVMTypeRef{ core.LLVMInt32Type(), core.LLVMInt64Type() };
     return core.LLVMStructType(&elems, 2, 0);
 }
 
@@ -1064,8 +1038,13 @@ fn getStringValue(builder: types.LLVMBuilderRef, value: [*:0]const u8) !types.LL
     const ptr = core.LLVMBuildAlloca(builder, arrTy, "strVal");
     const str = core.LLVMConstString(value, @intCast(zStr.len), 1);
     _ = core.LLVMBuildStore(builder, str, ptr);
-    var values: [2]types.LLVMValueRef = [_]types.LLVMValueRef{ core.LLVMConstInt(core.LLVMInt32Type(), zStr.len, 0), ptr };
-    return core.LLVMConstStruct(&values, 2, 0);
+    // Convert pointer to i64 for the { i32, i64 } string struct
+    const ptrInt = core.LLVMBuildPtrToInt(builder, ptr, core.LLVMInt64Type(), "strptrint");
+    const strType = getStringType();
+    var strVal = core.LLVMGetUndef(strType);
+    strVal = core.LLVMBuildInsertValue(builder, strVal, core.LLVMConstInt(core.LLVMInt32Type(), zStr.len, 0), 0, "withlen");
+    strVal = core.LLVMBuildInsertValue(builder, strVal, ptrInt, 1, "withdata");
+    return strVal;
 }
 
 fn convertToCString(allocator: std.mem.Allocator, str: *const []const u8) ![*:0]const u8 {

@@ -1,10 +1,13 @@
 const std = @import("std");
 
-pub const ZSTType = enum { number, boolean, char, unknown, function, struct_type, pointer, array_type };
+pub const ZSTType = enum { number, boolean, char, long, short, byte, unknown, function, struct_type, pointer, array_type };
 pub const ZSType = union(ZSTType) {
     number,
     boolean,
     char,
+    long,
+    short,
+    byte,
     unknown,
     function: ZSFunction,
     struct_type: ZSStructType,

@@ -114,12 +114,24 @@ fn typeToString(zsType: Symbol.ZSType) []const u8 {
         .number => "number",
         .boolean => "boolean",
         .char => "char",
+        .long => "long",
+        .short => "short",
+        .byte => "byte",
         .function => "function",
         .unknown => "unknown",
         .struct_type => |st| st.name,
         .pointer => "pointer",
         .array_type => "array",
     };
+}
+
+fn isNumericType(name: []const u8) bool {
+    return std.mem.eql(u8, name, "number") or
+        std.mem.eql(u8, name, "long") or
+        std.mem.eql(u8, name, "int") or
+        std.mem.eql(u8, name, "short") or
+        std.mem.eql(u8, name, "byte") or
+        std.mem.eql(u8, name, "char");
 }
 
 pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator, deps: *const std.StringHashMap(AnalyzeResult)) !AnalyzeResult {
@@ -175,16 +187,6 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
 
     // Register intrinsics
     try analyzer.registerIntrinsic(allocator, "__syscall3", &.{ "number", "number", "number", "number" }, .number);
-    try analyzer.registerIntrinsic(allocator, "__ptr_to_int", &.{"String"}, .number);
-    // Add pointer overload for __ptr_to_int
-    {
-        const argTypes2 = try allocator.alloc([]const u8, 1);
-        try analyzer.allocatedSliceLists.append(allocator, argTypes2);
-        argTypes2[0] = "pointer";
-        if (analyzer.overloads.getPtr("__ptr_to_int")) |entries| {
-            try entries.append(allocator, .{ .argTypes = argTypes2, .mangledName = "__ptr_to_int", .retType = .number, .external = true });
-        }
-    }
     try analyzer.registerIntrinsic(allocator, "__read_line", &.{}, getStringStructTypeStatic());
 
     // Inject prelude exports into scope
@@ -366,6 +368,10 @@ fn resolveTypeInner(r: ast.ZSType) Symbol.ZSType {
     }
     const name = r.typeName();
     if (std.mem.eql(u8, name, "number")) return .number;
+    if (std.mem.eql(u8, name, "int")) return .number;
+    if (std.mem.eql(u8, name, "long")) return .long;
+    if (std.mem.eql(u8, name, "short")) return .short;
+    if (std.mem.eql(u8, name, "byte")) return .byte;
     if (std.mem.eql(u8, name, "boolean")) return .boolean;
     if (std.mem.eql(u8, name, "char")) return .char;
     // Note: Pointer<T>, String, and other struct types are resolved
@@ -545,7 +551,7 @@ fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
         try self.tableStack.enterScope(&scope);
         // Add args as symbols in the function scope
         for (function.args) |arg| {
-            const argType = resolveTypeAnnotation(arg.type);
+            const argType = if (arg.type) |t| try self.resolveTypeAnnotationFull(t) else Symbol.ZSType.unknown;
             try self.tableStack.put(.{
                 .name = arg.name,
                 .assignable = false,
@@ -606,11 +612,8 @@ fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
                 try self.recordError(call, "ptr() expects exactly 1 argument");
                 return Symbol.ZSType.unknown;
             }
-            const innerType = try self.analyzeExpr(call.arguments[0]);
-            const innerPtr = try self.allocator.create(Symbol.ZSType);
-            innerPtr.* = innerType;
-            try self.allocatedTypes.append(self.allocator, innerPtr);
-            return Symbol.ZSType{ .pointer = innerPtr };
+            _ = try self.analyzeExpr(call.arguments[0]);
+            return Symbol.ZSType.long;
         }
         if (std.mem.eql(u8, name, "deref")) {
             if (call.arguments.len != 1) {
@@ -620,6 +623,7 @@ fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
             const argType = try self.analyzeExpr(call.arguments[0]);
             return switch (argType) {
                 .pointer => |inner| inner.*,
+                .long, .number => Symbol.ZSType.unknown,
                 else => blk: {
                     try self.recordError(call, "deref() argument must be a pointer");
                     break :blk Symbol.ZSType.unknown;
@@ -647,8 +651,11 @@ fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
                     var allMatch = true;
                     for (entry.argTypes, argTypes) |a, b| {
                         if (!std.mem.eql(u8, a, b)) {
-                            allMatch = false;
-                            break;
+                            // Allow numeric type compatibility
+                            if (!(isNumericType(a) and isNumericType(b))) {
+                                allMatch = false;
+                                break;
+                            }
                         }
                     }
                     if (allMatch) {
@@ -781,10 +788,14 @@ fn registerStructs(self: *Self, module: zsm.ZSModule) !void {
     }
 }
 
-fn resolveTypeAnnotationFull(self: *Self, astType: ast.ZSType) !Symbol.ZSType {
+fn resolveTypeAnnotationFull(self: *Self, astType: ast.ZSType) Error!Symbol.ZSType {
     switch (astType) {
         .reference => |ref| {
             if (std.mem.eql(u8, ref, "number")) return .number;
+            if (std.mem.eql(u8, ref, "int")) return .number;
+            if (std.mem.eql(u8, ref, "long")) return .long;
+            if (std.mem.eql(u8, ref, "short")) return .short;
+            if (std.mem.eql(u8, ref, "byte")) return .byte;
             if (std.mem.eql(u8, ref, "boolean")) return .boolean;
             if (std.mem.eql(u8, ref, "char")) return .char;
             // Check if it's a known struct type (non-generic)
@@ -804,12 +815,7 @@ fn resolveTypeAnnotationFull(self: *Self, astType: ast.ZSType) !Symbol.ZSType {
         },
         .generic => |g| {
             if (std.mem.eql(u8, g.name, "Pointer")) {
-                if (g.type_args.len != 1) return .unknown;
-                const innerType = try self.resolveTypeAnnotationFull(g.type_args[0]);
-                const innerPtr = try self.allocator.create(Symbol.ZSType);
-                innerPtr.* = innerType;
-                try self.allocatedTypes.append(self.allocator, innerPtr);
-                return Symbol.ZSType{ .pointer = innerPtr };
+                return .long;
             }
             // Check for generic struct
             if (self.structDefs.get(g.name)) |sd| {
@@ -820,7 +826,7 @@ fn resolveTypeAnnotationFull(self: *Self, astType: ast.ZSType) !Symbol.ZSType {
     }
 }
 
-fn instantiateStruct(self: *Self, sd: StructDef, typeArgs: []const ast.type_notation.ZSType) !Symbol.ZSType {
+fn instantiateStruct(self: *Self, sd: StructDef, typeArgs: []const ast.type_notation.ZSType) Error!Symbol.ZSType {
     // Build a mapping from type_param names to resolved types
     const resolvedFields = try self.allocator.alloc(sig.ZSStructField, sd.fields.len);
     try self.allocatedStructFields.append(self.allocator, resolvedFields);
@@ -843,7 +849,7 @@ fn instantiateStruct(self: *Self, sd: StructDef, typeArgs: []const ast.type_nota
     } };
 }
 
-fn resolveFieldType(self: *Self, fieldAstType: ast.type_notation.ZSType, typeParams: []const []const u8, resolvedTypeArgs: []const Symbol.ZSType) !Symbol.ZSType {
+fn resolveFieldType(self: *Self, fieldAstType: ast.type_notation.ZSType, typeParams: []const []const u8, resolvedTypeArgs: []const Symbol.ZSType) Error!Symbol.ZSType {
     switch (fieldAstType) {
         .reference => |ref| {
             // Check if it's a type parameter
@@ -856,7 +862,7 @@ fn resolveFieldType(self: *Self, fieldAstType: ast.type_notation.ZSType, typePar
             // Otherwise resolve normally
             return try self.resolveTypeAnnotationFull(fieldAstType);
         },
-        .generic => {
+        .generic, .array => {
             return try self.resolveTypeAnnotationFull(fieldAstType);
         },
     }

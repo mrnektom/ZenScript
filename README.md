@@ -45,7 +45,7 @@ fn process(x: string): string = x
 
 ### Types
 
-Supported types: `number`, `char`, `boolean`, `void`, arrays, and user-defined structs.
+Supported types: `number` (i32), `long` (i64), `int` (alias for number), `short` (i16), `byte` (i8), `char` (i8), `boolean`, `void`, arrays, and user-defined structs.
 
 Type annotations are used on function arguments and return types:
 
@@ -194,7 +194,6 @@ The `stdlib/` directory is auto-imported as a prelude. It provides:
 
 Low-level intrinsics available for systems programming:
 - `__syscall3(nr, arg1, arg2, arg3): number` — Linux syscall
-- `__ptr_to_int(s: String): number` — pointer to integer (also accepts `Pointer<T>`)
 - `__read_line(): String` — read line from stdin
 
 ## Compilation pipeline

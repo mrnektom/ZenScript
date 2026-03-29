@@ -1,8 +1,8 @@
 export { String } from "./string.zs"
 
 export fn print(s: String): void {
-  __syscall3(1, 1, __ptr_to_int(s), s.len)
-  __syscall3(1, 1, __ptr_to_int("\n"), 1)
+  __syscall3(1, 1, s.data, s.len)
+  __syscall3(1, 1, "\n".data, 1)
 }
 
 export fn print_number(n: number): void {
@@ -35,8 +35,8 @@ export fn print_number(n: number): void {
 
   let start = pos + 1
   let len = 20 - start
-  __syscall3(1, 1, __ptr_to_int(ptr(buf)) + start, len)
-  __syscall3(1, 1, __ptr_to_int("\n"), 1)
+  __syscall3(1, 1, ptr(buf) + start, len)
+  __syscall3(1, 1, "\n".data, 1)
 }
 
 export fn print(n: number): void = print_number(n)
