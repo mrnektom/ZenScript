@@ -103,6 +103,16 @@ let v = deref(px)      // dereference a pointer
 
 Generic pointer type annotation: `Pointer<number>`.
 
+Pointer indexing (byte-level access):
+
+```zs
+let buf = alloc(10)
+buf[0] = 'h'            // write byte at offset
+let c = buf[0]           // read byte at offset
+```
+
+`ptr[i]` on a `long` or `Pointer<T>` performs `*(ptr + i)` as a byte read/write.
+
 ### Char
 
 ```zs
@@ -237,8 +247,12 @@ The `stdlib/` directory is auto-imported as a prelude. It provides:
 - `print(n: number): void` — print a number (overloaded)
 - `read_line(): String` — read a line from stdin
 - `String` struct (re-exported from `string.zs`)
-- `alloc(size: number): Pointer<number>` — heap allocation
-- `free(ptr: Pointer<number>): void` — heap deallocation
+- `alloc(size: long): long` — heap allocation via mmap
+- `free(addr: long, size: long): void` — heap deallocation via munmap
+- `char_at(s: String, i: number): char` — get byte at index
+- `str_eq(a: String, b: String): boolean` — string equality comparison
+- `str_concat(a: String, b: String): String` — concatenate two strings
+- `substr(s: String, start: number, length: number): String` — extract substring
 
 ### Intrinsics
 
