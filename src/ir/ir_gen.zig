@@ -15,6 +15,7 @@ resolutions: *const std.AutoHashMap(usize, []const u8),
 overloadedNames: *const std.StringHashMap(void),
 fieldIndices: *const std.AutoHashMap(usize, u32),
 enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
+derefTypes: *const std.AutoHashMap(usize, []const u8),
 
 pub const IrGenResult = struct {
     instructions: ir.ZSIRInstructions,
@@ -33,8 +34,9 @@ pub fn generateIr(
     overloadedNames: *const std.StringHashMap(void),
     fieldIndices: *const std.AutoHashMap(usize, u32),
     enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
+    derefTypes: *const std.AutoHashMap(usize, []const u8),
 ) !IrGenResult {
-    return generateIrWithImports(module, allocator, resolutions, overloadedNames, fieldIndices, enumInits, null);
+    return generateIrWithImports(module, allocator, resolutions, overloadedNames, fieldIndices, enumInits, derefTypes, null);
 }
 
 pub fn generateIrWithImports(
@@ -44,6 +46,7 @@ pub fn generateIrWithImports(
     overloadedNames: *const std.StringHashMap(void),
     fieldIndices: *const std.AutoHashMap(usize, u32),
     enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
+    derefTypes: *const std.AutoHashMap(usize, []const u8),
     importedVarNames: ?*const std.StringHashMap([]const u8),
 ) !IrGenResult {
     var instructions = try std.ArrayList(ir.ZSIR).initCapacity(allocator, 5);
@@ -66,6 +69,7 @@ pub fn generateIrWithImports(
         .overloadedNames = overloadedNames,
         .fieldIndices = fieldIndices,
         .enumInits = enumInits,
+        .derefTypes = derefTypes,
     };
 
     for (module.ast) |node| {
@@ -155,9 +159,11 @@ fn generateCallOrIntrinsic(self: *Self, call: ast.expr.ZSCall) Error![]const u8 
         if (std.mem.eql(u8, name, "deref") and call.arguments.len == 1) {
             const operand = try self.generateExpr(call.arguments[0]);
             const resultName = try self.generateName();
+            const pointeeType = self.derefTypes.get(call.startPos) orelse "number";
             try self.instructions.append(self.allocator, ir.ZSIR{ .deref_op = .{
                 .resultName = resultName,
                 .operand = operand,
+                .pointeeType = pointeeType,
             } });
             return resultName;
         }

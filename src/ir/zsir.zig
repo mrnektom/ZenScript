@@ -267,6 +267,7 @@ pub const ZSIRPtrOp = struct {
 pub const ZSIRDerefOp = struct {
     resultName: []const u8,
     operand: []const u8,
+    pointeeType: []const u8,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         allocator.free(self.resultName);

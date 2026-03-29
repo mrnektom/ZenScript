@@ -113,7 +113,7 @@ fn generateInstruction(
         .struct_init => try generateStructInit(builder, locals, instruction.struct_init),
         .field_access => try generateFieldAccess(builder, locals, instruction.field_access),
         .ptr_op => try generatePtrOp(builder, locals, instruction.ptr_op),
-        .deref_op => {},
+        .deref_op => try generateDerefOp(builder, locals, instruction.deref_op),
         .enum_decl => try generateEnumDeclCodegen(module, instruction.enum_decl, allocator),
         .enum_init => try generateEnumInitCodegen(builder, module, locals, instruction.enum_init, allocator),
         .match_expr => try generateMatchCodegen(builder, module, locals, instruction.match_expr, allocator),
@@ -954,6 +954,35 @@ fn generatePtrOp(
     const alloca = core.LLVMBuildAlloca(builder, i64Type, "ptrop");
     _ = core.LLVMBuildStore(builder, ptrInt, alloca);
     try locals.put(op.resultName, LocalVar{ .ptr = alloca, .ty = i64Type });
+}
+
+fn generateDerefOp(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    op: ir.ZSIRDerefOp,
+) !void {
+    const operand = locals.get(op.operand) orelse return;
+    const i64Type = core.LLVMInt64Type();
+    const pointeeType = mapType(op.pointeeType);
+
+    // Load the i64 pointer value from the operand
+    const ptrInt = core.LLVMBuildLoad2(builder, i64Type, operand.ptr, "deref_ptrint");
+
+    // Convert i64 to a typed pointer
+    const typedPtr = core.LLVMBuildIntToPtr(
+        builder,
+        ptrInt,
+        core.LLVMPointerType(pointeeType, 0),
+        "deref_ptr",
+    );
+
+    // Load the value through the pointer
+    const loadedVal = core.LLVMBuildLoad2(builder, pointeeType, typedPtr, "deref_val");
+
+    // Store the result in an alloca
+    const alloca = core.LLVMBuildAlloca(builder, pointeeType, "deref_result");
+    _ = core.LLVMBuildStore(builder, loadedVal, alloca);
+    try locals.put(op.resultName, LocalVar{ .ptr = alloca, .ty = pointeeType });
 }
 
 fn generateArrayInit(

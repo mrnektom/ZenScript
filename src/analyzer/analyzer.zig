@@ -30,6 +30,7 @@ exportedEnumDefs: std.StringHashMap(EnumDef),
 useAliases: std.StringHashMap(UseAlias),
 allocatedEnumVariants: std.ArrayList([]sig.ZSEnumVariant),
 enumInits: std.AutoHashMap(usize, EnumInitInfo),
+derefTypes: std.AutoHashMap(usize, []const u8),
 
 pub const EnumInitInfo = struct {
     enumName: []const u8,
@@ -80,6 +81,7 @@ pub const AnalyzeResult = struct {
     exportedEnumDefs: std.StringHashMap(EnumDef),
     allocatedEnumVariants: std.ArrayList([]sig.ZSEnumVariant),
     enumInits: std.AutoHashMap(usize, EnumInitInfo),
+    derefTypes: std.AutoHashMap(usize, []const u8),
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         allocator.free(self.errors);
@@ -137,6 +139,7 @@ pub const AnalyzeResult = struct {
         }
         self.allocatedEnumVariants.deinit(allocator);
         self.enumInits.deinit();
+        self.derefTypes.deinit();
     }
 };
 
@@ -200,6 +203,7 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .useAliases = std.StringHashMap(UseAlias).init(allocator),
         .allocatedEnumVariants = try std.ArrayList([]sig.ZSEnumVariant).initCapacity(allocator, 4),
         .enumInits = std.AutoHashMap(usize, EnumInitInfo).init(allocator),
+        .derefTypes = std.AutoHashMap(usize, []const u8).init(allocator),
     };
 
     // Note: resolutions, overloadedNames, overloads, allocatedStrings, allocatedTypes,
@@ -335,6 +339,7 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .exportedEnumDefs = analyzer.exportedEnumDefs,
         .allocatedEnumVariants = analyzer.allocatedEnumVariants,
         .enumInits = analyzer.enumInits,
+        .derefTypes = analyzer.derefTypes,
     };
 }
 
@@ -697,8 +702,11 @@ fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
                 try self.recordError(call, "ptr() expects exactly 1 argument");
                 return Symbol.ZSType.unknown;
             }
-            _ = try self.analyzeExpr(call.arguments[0]);
-            return Symbol.ZSType.long;
+            const argType = try self.analyzeExpr(call.arguments[0]);
+            const innerPtr = try self.allocator.create(Symbol.ZSType);
+            innerPtr.* = argType;
+            try self.allocatedTypes.append(self.allocator, innerPtr);
+            return Symbol.ZSType{ .pointer = innerPtr };
         }
         if (std.mem.eql(u8, name, "deref")) {
             if (call.arguments.len != 1) {
@@ -706,14 +714,16 @@ fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
                 return Symbol.ZSType.unknown;
             }
             const argType = try self.analyzeExpr(call.arguments[0]);
-            return switch (argType) {
+            const resultType = switch (argType) {
                 .pointer => |inner| inner.*,
-                .long, .number => Symbol.ZSType.unknown,
+                .long, .number => Symbol.ZSType.number,
                 else => blk: {
                     try self.recordError(call, "deref() argument must be a pointer");
                     break :blk Symbol.ZSType.unknown;
                 },
             };
+            try self.derefTypes.put(call.startPos, typeToString(resultType));
+            return resultType;
         }
     }
 

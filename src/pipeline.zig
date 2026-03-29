@@ -96,6 +96,7 @@ fn compileModule(
         &analyzeResult.overloadedNames,
         &analyzeResult.fieldIndices,
         &analyzeResult.enumInits,
+        &analyzeResult.derefTypes,
         &importedVarNames,
     );
 
@@ -296,6 +297,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
             &analyzeResult.overloadedNames,
             &analyzeResult.fieldIndices,
             &analyzeResult.enumInits,
+            &analyzeResult.derefTypes,
             &importedVarNames,
         );
         defer entryIrResult.deinit(allocator);
