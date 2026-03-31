@@ -23,7 +23,10 @@ pub fn collectArgs() Error!ExecutionArgs {
         } else if (std.mem.eql(u8, arg, "-r")) {
             execArgs.run = true;
         } else if (std.mem.eql(u8, arg, "-o")) {
-            execArgs.outputPath = args.next();
+            const outputPathOpt = args.next();
+            if (outputPathOpt) |outputPath| {
+                execArgs.outputPath = outputPath;
+            }
         }
     }
 

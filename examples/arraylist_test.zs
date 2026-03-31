@@ -1,0 +1,10 @@
+import {  } from "stdlib/arraylist.zs"
+let glist = list_new<number>(4)
+glist = list_push<number>(glist, 10, 4)
+glist = list_push<number>(glist, 20, 4)
+glist = list_push<number>(glist, 30, 4)
+print_number(list_get<number>(glist, 0))
+print_number(list_get<number>(glist, 1))
+print_number(list_get<number>(glist, 2))
+print_number(glist.len)
+list_free<number>(glist, 4)

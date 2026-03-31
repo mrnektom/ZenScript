@@ -1,11 +1,20 @@
 export { String } from "./string.zs"
+export { Option } from "./Option.zs"
+import {} from "./arraylist.zs"
+struct Pointer<T> {
+    ptr: long
+}
+
+external fn ptr<T>(value: T): Pointer<T>
+external fn deref<T>(ptr: Pointer<T>): T
 
 export fn print(s: String): void {
   __syscall3(1, 1, s.data, s.len)
   __syscall3(1, 1, "\n".data, 1)
+
 }
 
-export fn print_number(n: number): void {
+export fn print(n: number): void {
   let buf = ['\0'; 20]
   let pos = 19
   let is_neg = 0
@@ -32,14 +41,13 @@ export fn print_number(n: number): void {
     buf[pos] = 45
     pos = pos - 1
   }
-
+  
   let start = pos + 1
   let len = 20 - start
   __syscall3(1, 1, ptr(buf) + start, len)
   __syscall3(1, 1, "\n".data, 1)
-}
 
-export fn print(n: number): void = print_number(n)
+}
 
 export fn alloc(size: long): long {
   return __syscall6(9, 0, size, 3, 34, -1, 0)
@@ -87,5 +95,5 @@ export fn substr(s: String, start: number, length: number): String {
   for (let i = 0; i < length; i = i + 1) {
     buf[i] = char_at(s, start + i)
   }
-  return String { len: length, data: buf }
+  return String { len:  }
 }

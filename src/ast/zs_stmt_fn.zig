@@ -1,6 +1,7 @@
 const ast = @import("ast_node.zig");
 
 name: []const u8,
+type_params: []const []const u8,
 args: []Arg,
 ret: ?ast.ZSType,
 modifiers: ast.stmt.Modifiers,

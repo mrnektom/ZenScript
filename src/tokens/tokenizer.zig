@@ -20,7 +20,10 @@ fn peek(self: *Tokenizer) ?u8 {
 }
 
 fn shift(self: *Tokenizer) void {
-    if (self.hasNext()) self.position += 1;
+    if (self.hasNext()) {
+        if (self.input[self.position] == '\n') self.line += 1;
+        self.position += 1;
+    }
 }
 
 pub fn hasNext(self: *Tokenizer) bool {
@@ -70,13 +73,8 @@ fn eatIdent(self: *Tokenizer) void {
 }
 
 fn eatNumeric(self: *Tokenizer) void {
-    var hasDot = false;
-
     while (self.peek()) |char| {
         if (std.ascii.isDigit(char)) {
-            self.shift();
-        } else if (char == '.' and !hasDot) {
-            hasDot = true;
             self.shift();
         } else {
             break;
@@ -91,6 +89,13 @@ fn eatString(self: *Tokenizer) !void {
         if (c == '"') {
             self.shift();
             return;
+        }
+
+        if (c == '\\') {
+            self.shift(); // consume backslash
+            if (self.peek() == null) return Error.UnexpectedEndOfInput;
+            self.shift(); // consume escaped char
+            continue;
         }
 
         self.shift();
@@ -280,6 +285,29 @@ test "unknown token error" {
 
 test "unterminated string error" {
     var t = Tokenizer.create("\"hello");
+    const result = t.next();
+    try std.testing.expectError(Error.UnexpectedEndOfInput, result);
+}
+
+test "line counting across newlines" {
+    var t = Tokenizer.create("a\nb\nc");
+    const tok1 = (try t.next()).?;
+    try std.testing.expectEqual(@as(usize, 0), tok1.startLine);
+    const tok2 = (try t.next()).?;
+    try std.testing.expectEqual(@as(usize, 1), tok2.startLine);
+    const tok3 = (try t.next()).?;
+    try std.testing.expectEqual(@as(usize, 2), tok3.startLine);
+}
+
+test "string with escaped quote" {
+    var t = Tokenizer.create("\"hello \\\"world\\\"\"");
+    const tok = (try t.next()).?;
+    try std.testing.expectEqual(TokenType.string, tok.type);
+    try std.testing.expectEqualStrings("\"hello \\\"world\\\"\"", tok.value);
+}
+
+test "unterminated escape in string" {
+    var t = Tokenizer.create("\"hello\\");
     const result = t.next();
     try std.testing.expectError(Error.UnexpectedEndOfInput, result);
 }

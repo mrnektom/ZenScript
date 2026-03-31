@@ -135,7 +135,7 @@ pub const ZSIRCall = struct {
         try writer.print("{s} = {s}(", .{ self.resultName, self.fnName });
         for (self.argNames, 0..) |argname, index| {
             try writer.print("{s}", .{argname});
-            if (index < self.argNames.len - 1) try writer.print("{s}", .{argname});
+            if (index < self.argNames.len - 1) try writer.print(", ", .{});
         }
         try writer.print(")", .{});
     }
@@ -299,6 +299,7 @@ pub const ZSIRIndexAccess = struct {
     resultName: []const u8,
     subject: []const u8,
     index: []const u8,
+    elemType: ?[]const u8 = null,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         allocator.free(self.resultName);
@@ -309,6 +310,7 @@ pub const ZSIRIndexStore = struct {
     subject: []const u8,
     index: []const u8,
     value: []const u8,
+    elemType: ?[]const u8 = null,
 
     pub fn deinit(_: *const @This(), _: std.mem.Allocator) void {}
 };
@@ -327,6 +329,7 @@ pub const ZSIREnumInit = struct {
 pub const ZSIRMatchArm = struct {
     variantTag: u32,
     binding: ?[]const u8,
+    bindingType: ?[]const u8 = null,
     body: []ZSIR,
     resultName: ?[]const u8,
 };

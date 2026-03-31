@@ -1,41 +1,61 @@
 const std = @import("std");
+
+fn clampPos(source: []const u8, pos: usize) usize {
+    if (source.len == 0) return 0;
+    return @min(pos, source.len - 1);
+}
+
 pub fn computeSourceLine(source: []const u8, pos: usize) []const u8 {
+    if (source.len == 0) return "";
+    const p = clampPos(source, pos);
+
+    // Find the start of the current line (scan backwards for '\n')
     var startPos: usize = 0;
-    var endPos = source.len;
-    for (0..pos + 1) |c| {
-        if (source[pos - c] == '\n') {
-            startPos = pos - c;
-            break;
+    if (p > 0) {
+        for (1..p + 1) |c| {
+            if (source[p - c] == '\n') {
+                startPos = p - c + 1;
+                break;
+            }
         }
     }
 
-    if (startPos > 0) startPos += 1;
-
-    for (pos..source.len) |i| {
+    // Find the end of the current line (scan forwards for '\n')
+    var endPos = source.len;
+    for (p..source.len) |i| {
         if (source[i] == '\n') {
             endPos = i;
             break;
         }
     }
+
     return source[startPos..endPos];
 }
 
 pub fn computeLineOffset(source: []const u8, pos: usize) usize {
+    if (source.len == 0) return 0;
+    const p = clampPos(source, pos);
+
+    // Find the start of the current line (scan backwards for '\n')
     var startPos: usize = 0;
-    for (0..pos + 1) |c| {
-        if (source[pos - c] == '\n') {
-            startPos = pos - c + 1;
-            break;
+    if (p > 0) {
+        for (1..p + 1) |c| {
+            if (source[p - c] == '\n') {
+                startPos = p - c + 1;
+                break;
+            }
         }
     }
 
-    return pos - startPos;
+    return p - startPos;
 }
 
 pub fn computeLineNumber(source: []const u8, pos: usize) usize {
+    if (source.len == 0) return 0;
+    const p = clampPos(source, pos);
     var number: usize = 0;
-    for (0..pos) |c| {
-        if (source[pos - c] == '\n') {
+    for (0..p + 1) |c| {
+        if (source[p - c] == '\n') {
             number += 1;
         }
     }

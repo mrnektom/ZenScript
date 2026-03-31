@@ -40,19 +40,16 @@ pub fn put(self: *Self, symbol: Symbol) !void {
 }
 
 pub fn get(self: *Self, name: []const u8) ?Symbol {
+    if (self.list.items.len == 0) return null;
     var index = self.list.items.len - 1;
 
     while (true) {
-        if (index >= 0) {
-            const table = self.list.items[index];
+        const table = self.list.items[index];
 
-            if (table.get(name)) |sym| {
-                return sym;
-            }
-            if (index == 0) return null;
-            index -= 1;
-            continue;
+        if (table.get(name)) |sym| {
+            return sym;
         }
+        if (index == 0) return null;
+        index -= 1;
     }
-    return null;
 }

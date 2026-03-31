@@ -1,0 +1,24 @@
+package org.zenscript.intellij.psi
+
+object ZenScriptElementTypes {
+    @JvmField val VAR_DECLARATION = ZenScriptElementType("VAR_DECLARATION")
+    @JvmField val FN_DECLARATION = ZenScriptElementType("FN_DECLARATION")
+    @JvmField val STRUCT_DECLARATION = ZenScriptElementType("STRUCT_DECLARATION")
+    @JvmField val ENUM_DECLARATION = ZenScriptElementType("ENUM_DECLARATION")
+    @JvmField val ENUM_VARIANT = ZenScriptElementType("ENUM_VARIANT")
+    @JvmField val STRUCT_FIELD = ZenScriptElementType("STRUCT_FIELD")
+    @JvmField val PARAMETER = ZenScriptElementType("PARAMETER")
+    @JvmField val PARAMETER_LIST = ZenScriptElementType("PARAMETER_LIST")
+    @JvmField val BLOCK = ZenScriptElementType("BLOCK")
+    @JvmField val IF_STATEMENT = ZenScriptElementType("IF_STATEMENT")
+    @JvmField val WHILE_STATEMENT = ZenScriptElementType("WHILE_STATEMENT")
+    @JvmField val FOR_STATEMENT = ZenScriptElementType("FOR_STATEMENT")
+    @JvmField val REFERENCE_EXPRESSION = ZenScriptElementType("REFERENCE_EXPRESSION")
+    @JvmField val TYPE_REFERENCE = ZenScriptElementType("TYPE_REFERENCE")
+    @JvmField val IMPORT_STATEMENT = ZenScriptElementType("IMPORT_STATEMENT")
+    @JvmField val EXPORT_FROM_STATEMENT = ZenScriptElementType("EXPORT_FROM_STATEMENT")
+    @JvmField val USE_STATEMENT = ZenScriptElementType("USE_STATEMENT")
+    @JvmField val IMPORT_SYMBOL = ZenScriptElementType("IMPORT_SYMBOL")
+    @JvmField val IMPORT_PATH = ZenScriptElementType("IMPORT_PATH")
+    @JvmField val RETURN_STATEMENT = ZenScriptElementType("RETURN_STATEMENT")
+}

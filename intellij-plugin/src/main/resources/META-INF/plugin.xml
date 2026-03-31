@@ -1,0 +1,62 @@
+<idea-plugin>
+    <id>org.zenscript.intellij</id>
+    <name>ZenScript</name>
+    <version>0.1.0</version>
+    <vendor>ZenScript</vendor>
+
+    <description><![CDATA[
+    Language support for ZenScript (.zs files).
+    Provides syntax highlighting, file type recognition, and basic structure view.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <fileType
+                name="ZenScript"
+                implementationClass="org.zenscript.intellij.ZenScriptFileType"
+                fieldName="INSTANCE"
+                language="ZenScript"
+                extensions="zs"/>
+
+        <lang.parserDefinition
+                language="ZenScript"
+                implementationClass="org.zenscript.intellij.parser.ZenScriptParserDefinition"/>
+
+        <lang.syntaxHighlighterFactory
+                language="ZenScript"
+                implementationClass="org.zenscript.intellij.highlighting.ZenScriptSyntaxHighlighterFactory"/>
+
+        <lang.psiStructureViewFactory
+                language="ZenScript"
+                implementationClass="org.zenscript.intellij.structure.ZenScriptStructureViewFactory"/>
+
+        <lang.documentationProvider
+                language="ZenScript"
+                implementationClass="org.zenscript.intellij.documentation.ZenScriptDocumentationProvider"/>
+
+        <completion.contributor
+                language="ZenScript"
+                implementationClass="org.zenscript.intellij.completion.ZenScriptCompletionContributor"/>
+
+        <annotator
+                language="ZenScript"
+                implementationClass="org.zenscript.intellij.highlighting.ZenScriptAnnotator"/>
+
+        <colorSettingsPage
+                implementation="org.zenscript.intellij.highlighting.ZenScriptColorSettingsPage"/>
+
+        <projectService
+                serviceImplementation="org.zenscript.intellij.settings.ZenScriptSettings"/>
+
+        <projectService
+                serviceImplementation="org.zenscript.intellij.settings.ZenScriptPreludeService"/>
+
+        <projectConfigurable
+                parentId="language"
+                instance="org.zenscript.intellij.settings.ZenScriptSettingsConfigurable"
+                id="org.zenscript.intellij.settings"
+                displayName="ZenScript"/>
+
+    </extensions>
+</idea-plugin>

@@ -173,6 +173,166 @@ class ZenScriptImportResolveTest : BasePlatformTestCase() {
         assertEquals("Blue", variants[2].getOriginalName())
     }
 
+    fun testExportFromMakesSymbolLocallyVisible() {
+        myFixture.addFileToProject(
+            "original.zs",
+            """
+            fn foo(): number = 42;
+            """.trimIndent()
+        )
+        val file = myFixture.configureByText(
+            "main.zs",
+            """
+            export { foo } from "./original.zs";
+            let x = foo();
+            """.trimIndent()
+        )
+
+        val refs = PsiTreeUtil.findChildrenOfType(file, ZenScriptReferenceExpression::class.java)
+        val fooRef = refs.find { it.text == "foo" }
+        assertNotNull("Should find reference to foo in code", fooRef)
+
+        val resolved = fooRef!!.reference.resolve()
+        assertNotNull("export-from should make symbol locally visible", resolved)
+        assertInstanceOf(resolved, ZenScriptFnDeclaration::class.java)
+        assertEquals("foo", (resolved as ZenScriptFnDeclaration).name)
+    }
+
+    fun testUseStatementResolvesToEnumVariant() {
+        val file = myFixture.configureByText(
+            "main.zs",
+            """
+            enum Color { Red, Green, Blue }
+            use Color.{ Red };
+            """.trimIndent()
+        )
+
+        val useStmt = PsiTreeUtil.findChildOfType(file, ZenScriptUseStatement::class.java)
+        assertNotNull("USE_STATEMENT should exist", useStmt)
+
+        val symbols = useStmt!!.getVariantSymbols()
+        assertEquals(1, symbols.size)
+
+        val resolved = symbols[0].reference.resolve()
+        assertNotNull("Use symbol should resolve to enum variant", resolved)
+        assertInstanceOf(resolved, ZenScriptEnumVariant::class.java)
+        assertEquals("Red", (resolved as ZenScriptEnumVariant).name)
+    }
+
+    fun testUseStatementVariantUsedInCodeResolvesToEnumVariant() {
+        val file = myFixture.configureByText(
+            "main.zs",
+            """
+            enum Color { Red, Green, Blue }
+            use Color.{ Red };
+            let x = Red;
+            """.trimIndent()
+        )
+
+        val refs = PsiTreeUtil.findChildrenOfType(file, ZenScriptReferenceExpression::class.java)
+        val redRef = refs.find { it.text == "Red" }
+        assertNotNull("Should find reference to Red in code", redRef)
+
+        val resolved = redRef!!.reference.resolve()
+        assertNotNull("Reference to used variant should resolve", resolved)
+        assertInstanceOf(resolved, ZenScriptEnumVariant::class.java)
+        assertEquals("Red", (resolved as ZenScriptEnumVariant).name)
+    }
+
+    fun testUseWithImportedEnumResolvesVariant() {
+        myFixture.addFileToProject(
+            "colors.zs",
+            """
+            enum Color { Red, Green, Blue }
+            """.trimIndent()
+        )
+        val file = myFixture.configureByText(
+            "main.zs",
+            """
+            import { Color } from "./colors.zs";
+            use Color.{ Red };
+            let x = Red;
+            """.trimIndent()
+        )
+
+        val refs = PsiTreeUtil.findChildrenOfType(file, ZenScriptReferenceExpression::class.java)
+        val redRef = refs.find { it.text == "Red" }
+        assertNotNull("Should find reference to Red in code", redRef)
+
+        val resolved = redRef!!.reference.resolve()
+        assertNotNull("use with imported enum should resolve variant", resolved)
+        assertInstanceOf(resolved, ZenScriptEnumVariant::class.java)
+        assertEquals("Red", (resolved as ZenScriptEnumVariant).name)
+    }
+
+    fun testForLoopVariableResolvesInsideBody() {
+        val file = myFixture.configureByText(
+            "main.zs",
+            """
+            fn test() {
+                for (let i = 0; i < 10; i = i + 1) {
+                    let x = i;
+                }
+            }
+            """.trimIndent()
+        )
+
+        val refs = PsiTreeUtil.findChildrenOfType(file, ZenScriptReferenceExpression::class.java)
+        // Find the reference to 'i' inside the for body (let x = i)
+        val iRefs = refs.filter { it.text == "i" }
+        assertTrue("Should find references to i", iRefs.isNotEmpty())
+
+        // The last 'i' reference (in let x = i) should resolve to the var declaration
+        val lastIRef = iRefs.last()
+        val resolved = lastIRef.reference.resolve()
+        assertNotNull("For-loop variable should resolve inside body", resolved)
+        assertInstanceOf(resolved, ZenScriptVarDeclaration::class.java)
+    }
+
+    fun testIfConditionReferenceResolves() {
+        val file = myFixture.configureByText(
+            "main.zs",
+            """
+            let flag = true;
+            if (flag) {
+                let x = 1;
+            }
+            """.trimIndent()
+        )
+
+        val refs = PsiTreeUtil.findChildrenOfType(file, ZenScriptReferenceExpression::class.java)
+        val flagRef = refs.find { it.text == "flag" }
+        assertNotNull("Should find reference to flag in if condition", flagRef)
+
+        val resolved = flagRef!!.reference.resolve()
+        assertNotNull("Reference in if condition should resolve", resolved)
+        assertInstanceOf(resolved, ZenScriptVarDeclaration::class.java)
+        assertEquals("flag", (resolved as ZenScriptVarDeclaration).name)
+    }
+
+    fun testWhileConditionReferenceResolves() {
+        val file = myFixture.configureByText(
+            "main.zs",
+            """
+            let running = true;
+            fn test() {
+                while (running) {
+                    let x = 1;
+                }
+            }
+            """.trimIndent()
+        )
+
+        val refs = PsiTreeUtil.findChildrenOfType(file, ZenScriptReferenceExpression::class.java)
+        val runningRef = refs.find { it.text == "running" }
+        assertNotNull("Should find reference to running in while condition", runningRef)
+
+        val resolved = runningRef!!.reference.resolve()
+        assertNotNull("Reference in while condition should resolve", resolved)
+        assertInstanceOf(resolved, ZenScriptVarDeclaration::class.java)
+        assertEquals("running", (resolved as ZenScriptVarDeclaration).name)
+    }
+
     fun testUnresolvedImportSymbolReturnsNull() {
         myFixture.addFileToProject(
             "lib.zs",

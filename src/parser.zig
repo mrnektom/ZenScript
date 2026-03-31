@@ -13,6 +13,7 @@ peekedToken: ?Token,
 allocator: std.mem.Allocator,
 filename: []const u8,
 source: []const u8,
+allocatedStrings: std.ArrayList([]const u8),
 
 const Error = error{ UnexpectedTokenType, UnexpectedToken, NotShiftedToken, UnsupportedClone } || Tokenizer.Error || std.mem.Allocator.Error;
 
@@ -28,12 +29,14 @@ pub fn create(
         .allocator = allocator,
         .filename = filename,
         .source = source,
+        .allocatedStrings = try std.ArrayList([]const u8).initCapacity(allocator, 4),
     };
 }
 
 pub fn parse(self: *Self, allocator: std.mem.Allocator) !ZSModule {
     var astNodes = try std.ArrayList(ZSAstNode).initCapacity(allocator, 5);
     defer astNodes.deinit(allocator);
+    defer self.allocatedStrings.deinit(self.allocator);
 
     while (true) {
         const node = self.nextNode() catch |err| break try self.printError(err);
@@ -76,6 +79,7 @@ pub fn parse(self: *Self, allocator: std.mem.Allocator) !ZSModule {
         .deps = try allocator.dupe(zsm.ZSModuleDep, depsList.items),
         .filename = self.filename,
         .source = self.source,
+        .allocatedStrings = try allocator.dupe([]const u8, self.allocatedStrings.items),
     };
 }
 
@@ -221,12 +225,23 @@ fn nextExportFrom(self: *Self) Error!?ast.ZSExportFrom {
 
 fn nextStmt(self: *Self) !?ast.stmt.ZSStmt {
     if (!self.tokenizer.hasNext() and self.peekedToken == null) return null;
+
+    // Save state before consuming modifiers so we can backtrack if no statement matches
+    const savedPeeked = self.peekedToken;
+    const savedPos = self.tokenizer.position;
+    const savedLine = self.tokenizer.line;
+
     const modifiers = try self.nextModifiers();
     if (try self.nextStruct(modifiers)) |s| return ast.stmt.ZSStmt{ .struct_decl = s };
     if (try self.nextEnum(modifiers)) |e| return ast.stmt.ZSStmt{ .enum_decl = e };
     if (try self.nextVar(modifiers)) |v| return ast.stmt.ZSStmt{ .variable = v };
     if (try self.nextFn(modifiers)) |f| return ast.stmt.ZSStmt{ .function = f };
     if (try self.nextReassign()) |r| return ast.stmt.ZSStmt{ .reassign = r };
+
+    // No statement matched — restore tokens consumed by nextModifiers
+    self.peekedToken = savedPeeked;
+    self.tokenizer.position = savedPos;
+    self.tokenizer.line = savedLine;
     return Error.UnknownToken;
 }
 
@@ -252,7 +267,7 @@ fn nextReassign(self: *Self) Error!?ast.stmt.ZSReassign {
         if (self.checkToken("=")) {
             self.shiftToken();
             const expr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
-            return ast.stmt.ZSReassign{ .target = .{ .index = .{ .subject_name = name, .index = indexExpr } }, .expr = expr };
+            return ast.stmt.ZSReassign{ .target = .{ .index = .{ .subject_name = name, .index = indexExpr, .startPos = token.startPos } }, .expr = expr };
         }
         // Backtrack
         self.peekedToken = savedPeeked;
@@ -300,6 +315,12 @@ fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
         if (try self.nextCharLiteral()) |c| break :blk ast.expr.ZSExpr{ .char = c };
         if (try self.nextBoolean()) |b| break :blk ast.expr.ZSExpr{ .boolean = b };
         if (try self.nextReference()) |r| {
+            // Check for generic type args: name<Type, ...>
+            if (try self.tryParseGenericArgs(r)) |genRef| {
+                // Check for generic struct init: Name<Type> { ... }
+                if (try self.nextStructInit(genRef)) |si| break :blk ast.expr.ZSExpr{ .struct_init = si };
+                break :blk ast.expr.ZSExpr{ .reference = genRef };
+            }
             // Check for struct init: Name { field: value, ... }
             if (try self.nextStructInit(r)) |si| break :blk ast.expr.ZSExpr{ .struct_init = si };
             break :blk ast.expr.ZSExpr{ .reference = r };
@@ -329,6 +350,81 @@ fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
     }
 
     return expr;
+}
+
+/// Try to parse generic type arguments after a reference: name<Type, ...>
+/// Returns a new reference with mangled name (e.g., "list_push$number") if successful.
+/// Uses backtracking to avoid consuming tokens on failure.
+fn tryParseGenericArgs(self: *Self, ref: ast.expr.ZSReference) Error!?ast.expr.ZSReference {
+    if (!self.checkToken("<")) return null;
+
+    // Save state for backtracking
+    const savedPeeked = self.peekedToken;
+    const savedPos = self.tokenizer.position;
+    const savedLine = self.tokenizer.line;
+
+    self.shiftToken(); // consume '<'
+
+    // Try to parse type args (must be identifiers separated by commas, ending with '>')
+    var typeArgNames = try std.ArrayList([]const u8).initCapacity(self.allocator, 2);
+    defer typeArgNames.deinit(self.allocator);
+
+    while (true) {
+        const token = self.peekToken() catch {
+            self.peekedToken = savedPeeked;
+            self.tokenizer.position = savedPos;
+            self.tokenizer.line = savedLine;
+            return null;
+        };
+        if (token.type != .ident) {
+            // Not a type arg — backtrack (this is likely a < comparison)
+            self.peekedToken = savedPeeked;
+            self.tokenizer.position = savedPos;
+            self.tokenizer.line = savedLine;
+            return null;
+        }
+        self.shiftToken();
+        try typeArgNames.append(self.allocator, token.value);
+        if (self.checkToken(",")) {
+            self.shiftToken();
+            continue;
+        }
+        break;
+    }
+
+    if (!self.checkToken(">")) {
+        // Not generic — backtrack
+        self.peekedToken = savedPeeked;
+        self.tokenizer.position = savedPos;
+        self.tokenizer.line = savedLine;
+        return null;
+    }
+    self.shiftToken(); // consume '>'
+
+    // Must be followed by '(' (call) or '{' (struct init) to be valid generic syntax
+    if (!self.checkToken("(") and !self.checkToken("{")) {
+        self.peekedToken = savedPeeked;
+        self.tokenizer.position = savedPos;
+        self.tokenizer.line = savedLine;
+        return null;
+    }
+
+    // Build mangled name: "name$type1$type2"
+    var mangledName = try std.ArrayList(u8).initCapacity(self.allocator, ref.name.len + 16);
+    defer mangledName.deinit(self.allocator);
+    try mangledName.appendSlice(self.allocator, ref.name);
+    for (typeArgNames.items) |ta| {
+        try mangledName.append(self.allocator, '$');
+        try mangledName.appendSlice(self.allocator, ta);
+    }
+    const duped = try self.allocator.dupe(u8, mangledName.items);
+    try self.allocatedStrings.append(self.allocator, duped);
+
+    return ast.expr.ZSReference{
+        .name = duped,
+        .startPos = ref.startPos,
+        .endPos = ref.endPos,
+    };
 }
 
 fn nextStructInit(self: *Self, ref: ast.expr.ZSReference) Error!?ast.expr.ZSStructInit {
@@ -500,6 +596,7 @@ fn nextCharLiteral(self: *Self) Error!?ast.expr.ZSChar {
 
     const raw = token.value; // e.g., 'a' or '\n'
     // Strip surrounding quotes
+    if (raw.len < 3) return Error.UnexpectedToken; // malformed char literal (e.g. '')
     const inner = raw[1 .. raw.len - 1];
     const value: u8 = if (inner.len == 2 and inner[0] == '\\') switch (inner[1]) {
         'n' => '\n',
@@ -509,7 +606,7 @@ fn nextCharLiteral(self: *Self) Error!?ast.expr.ZSChar {
         '\'' => '\'',
         '0' => 0,
         else => inner[1],
-    } else inner[0];
+    } else if (inner.len >= 1) inner[0] else return Error.UnexpectedToken;
 
     return ast.expr.ZSChar{
         .value = value,
@@ -815,16 +912,42 @@ fn nextVar(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSVar {
     };
     self.shiftToken();
     const name = try self.nextIdent();
+
+    // Parse optional type annotation: `: Type`
+    var type_annotation: ?ast.ZSType = null;
+    if (self.checkToken(":")) {
+        self.shiftToken();
+        type_annotation = try self.nextTypeInner();
+    }
+
     try self.expectToken("=");
     const expr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
 
-    return ast.stmt.ZSVar{ .type = varType, .name = name, .expr = expr, .modifiers = modifiers };
+    return ast.stmt.ZSVar{ .type = varType, .name = name, .expr = expr, .modifiers = modifiers, .type_annotation = type_annotation };
 }
 
 fn nextFn(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSFn {
     if (!self.checkToken("fn")) return null;
     self.shiftToken();
     const name = try self.nextIdent();
+
+    // Parse optional type parameters: <T, U>
+    var type_params = try std.ArrayList([]const u8).initCapacity(self.allocator, 2);
+    defer type_params.deinit(self.allocator);
+    if (self.checkToken("<")) {
+        self.shiftToken();
+        while (true) {
+            const paramName = try self.nextIdent();
+            try type_params.append(self.allocator, paramName);
+            if (self.checkToken(",")) {
+                self.shiftToken();
+                continue;
+            }
+            break;
+        }
+        try self.expectToken(">");
+    }
+
     try self.expectToken("(");
     var args = try std.ArrayList(ast.stmt.ZSFn.Arg).initCapacity(self.allocator, 1);
     defer args.deinit(self.allocator);
@@ -862,6 +985,7 @@ fn nextFn(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSFn {
 
     return ast.stmt.ZSFn{
         .name = name,
+        .type_params = try self.allocator.dupe([]const u8, type_params.items),
         .modifiers = modifiers,
         .args = try self.allocator.dupe(ast.stmt.ZSFn.Arg, args.items),
         .ret = ret,
@@ -1159,11 +1283,12 @@ fn nextCall(self: *Self, subject: ast.expr.ZSExpr) Error!?ast.expr.ZSCall {
     const start = subject.start();
     const end = (try self.peekToken()).endPos;
     try self.expectToken(")");
+    const arguments = try self.allocator.dupe(ast.expr.ZSExpr, args.items);
     const expr = try self.allocator.alloc(ast.expr.ZSExpr, 1);
     expr[0] = subject;
     return ast.expr.ZSCall{
         .subject = &expr[0],
-        .arguments = try self.allocator.dupe(ast.expr.ZSExpr, args.items),
+        .arguments = arguments,
         .startPos = start,
         .endPos = end,
     };

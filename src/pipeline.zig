@@ -11,6 +11,75 @@ const core = llvm_lib.core;
 const engine = llvm_lib.engine;
 const Args = @import("args/args.zig");
 const zsm = @import("ast/zs_module.zig");
+const type_notation = @import("ast/zs_type_notation.zig");
+
+/// Convert an AST type notation to the string name used by codegen's mapType.
+fn resolveFieldTypeName(t: type_notation.ZSType) []const u8 {
+    return switch (t) {
+        .reference => |ref| {
+            if (std.mem.eql(u8, ref, "number") or std.mem.eql(u8, ref, "int")) return "number";
+            if (std.mem.eql(u8, ref, "long")) return "long";
+            if (std.mem.eql(u8, ref, "short")) return "short";
+            if (std.mem.eql(u8, ref, "byte")) return "byte";
+            if (std.mem.eql(u8, ref, "boolean")) return "boolean";
+            if (std.mem.eql(u8, ref, "char")) return "char";
+            if (std.mem.eql(u8, ref, "String")) return "String";
+            if (std.mem.eql(u8, ref, "c_string")) return "c_string";
+            if (std.mem.eql(u8, ref, "void")) return "void";
+            return ref; // struct name — will be looked up in registry
+        },
+        .generic => |g| {
+            if (std.mem.eql(u8, g.name, "Pointer")) return "pointer";
+            return g.name; // other generic struct names
+        },
+        .array => "pointer", // arrays as pointers
+    };
+}
+
+/// Build a map of struct name → field type name strings from analyzer struct defs.
+fn buildStructFieldTypes(
+    allocator: std.mem.Allocator,
+    structDefs: *const std.StringHashMap(Analyzer.StructDef),
+    depStructDefs: []const *const std.StringHashMap(Analyzer.StructDef),
+) !std.StringHashMap([]const []const u8) {
+    var result = std.StringHashMap([]const []const u8).init(allocator);
+    errdefer {
+        var it = result.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.value_ptr.*);
+        }
+        result.deinit();
+    }
+    // Add from deps
+    for (depStructDefs) |defs| {
+        var iter = defs.iterator();
+        while (iter.next()) |entry| {
+            if (!result.contains(entry.key_ptr.*)) {
+                const sd = entry.value_ptr.*;
+                const fieldTypes = try allocator.alloc([]const u8, sd.fields.len);
+                errdefer allocator.free(fieldTypes);
+                for (sd.fields, 0..) |field, i| {
+                    fieldTypes[i] = resolveFieldTypeName(field.type);
+                }
+                try result.put(entry.key_ptr.*, fieldTypes);
+            }
+        }
+    }
+    // Add from main module
+    var iter = structDefs.iterator();
+    while (iter.next()) |entry| {
+        if (!result.contains(entry.key_ptr.*)) {
+            const sd = entry.value_ptr.*;
+            const fieldTypes = try allocator.alloc([]const u8, sd.fields.len);
+            errdefer allocator.free(fieldTypes);
+            for (sd.fields, 0..) |field, i| {
+                fieldTypes[i] = resolveFieldTypeName(field.type);
+            }
+            try result.put(entry.key_ptr.*, fieldTypes);
+        }
+    }
+    return result;
+}
 
 const CompiledModule = struct {
     analyzeResult: Analyzer.AnalyzeResult,
@@ -49,6 +118,7 @@ fn compileModule(
 
     // Read file
     const file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+    defer file.close();
     const fileSize: usize = @intCast((try file.stat()).size);
     const buffer = try file.readToEndAlloc(allocator, fileSize);
     try allSources.append(allocator, buffer);
@@ -72,9 +142,9 @@ fn compileModule(
         defer allocator.free(resolvedPath);
 
         const depPath = try allocator.dupe(u8, resolvedPath);
+        defer allocator.free(depPath);
         const depCompiled = try compileModule(allocator, depPath, cache, inProgress, allSources, allModules);
         try depAnalyzeResults.put(dep.path, depCompiled.analyzeResult);
-        allocator.free(depPath);
 
         // Map imported symbol names (using alias if present) to their IR names from the dep
         for (dep.symbols) |sym| {
@@ -97,7 +167,12 @@ fn compileModule(
         &analyzeResult.fieldIndices,
         &analyzeResult.enumInits,
         &analyzeResult.derefTypes,
+        &analyzeResult.indexElemTypes,
+        analyzeResult.monomorphizedFunctions.items,
+        &analyzeResult.structInitResolutions,
         &importedVarNames,
+        &analyzeResult.monomorphizedEnums,
+        &analyzeResult.matchEnumNames,
     );
 
     const compiled = CompiledModule{
@@ -107,6 +182,7 @@ fn compileModule(
 
     // Cache result and unmark in-progress
     const cacheKey = try allocator.dupe(u8, path);
+    errdefer allocator.free(cacheKey);
     try cache.put(cacheKey, compiled);
     _ = inProgress.remove(path);
 
@@ -180,6 +256,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
     defer _ = gpa.deinit();
 
     const file = try std.fs.cwd().openFile(args.entryPoint, .{ .mode = .read_only });
+    defer file.close();
     const fileSize: usize = @intCast((try file.stat()).size);
     const buffer = try file.readToEndAlloc(allocator, fileSize);
     defer allocator.free(buffer);
@@ -237,13 +314,10 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
         defer allocator.free(resolvedPath);
 
         const depPath = try allocator.dupe(u8, resolvedPath);
-        const depResult = compileModule(allocator, depPath, &cache, &inProgress, &allSources, &allModules) catch |err| {
-            allocator.free(depPath);
-            return err;
-        };
+        defer allocator.free(depPath);
+        const depResult = try compileModule(allocator, depPath, &cache, &inProgress, &allSources, &allModules);
         try depAnalyzeResults.put(dep.path, depResult.analyzeResult);
         try depCompiled.append(allocator, depResult);
-        allocator.free(depPath);
 
         // Map imported symbol names to their IR names from the dep
         for (dep.symbols) |sym| {
@@ -259,19 +333,39 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
     var preludeOverloads: ?*const std.StringHashMap(std.ArrayList(Analyzer.OverloadEntry)) = null;
     var preludeStructDefs: ?*const std.StringHashMap(Analyzer.StructDef) = null;
     var preludeEnumDefs: ?*const std.StringHashMap(Analyzer.EnumDef) = null;
+    var preludeGenericFns: ?*const std.StringHashMap(Analyzer.GenericFnDef) = null;
     if (try findPreludePath(allocator)) |pPath| {
         defer allocator.free(pPath);
         if (compileModule(allocator, pPath, &cache, &inProgress, &allSources, &allModules)) |preludeCompiled| {
+            // Add prelude first so its functions (alloc, free, etc.) are available
             try depCompiled.append(allocator, preludeCompiled);
-            preludeExports = &preludeCompiled.analyzeResult.exports;
-            preludeOverloads = &preludeCompiled.analyzeResult.overloads;
-            preludeStructDefs = &preludeCompiled.analyzeResult.exportedStructDefs;
-            preludeEnumDefs = &preludeCompiled.analyzeResult.exportedEnumDefs;
+            // Add prelude's transitive deps (like arraylist.zs) after
+            var cacheIter2 = cache.iterator();
+            while (cacheIter2.next()) |cEntry| {
+                // Check if already in depCompiled (avoid duplicates)
+                var found = false;
+                for (depCompiled.items) |existing| {
+                    if (existing.irResult.instructions.instructions.ptr == cEntry.value_ptr.irResult.instructions.instructions.ptr) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    try depCompiled.append(allocator, cEntry.value_ptr.*);
+                }
+            }
+            // Get a stable pointer from the cache (not the local copy which goes out of scope)
+            const cachedPrelude = cache.getPtr(pPath) orelse unreachable;
+            preludeExports = &cachedPrelude.analyzeResult.exports;
+            preludeOverloads = &cachedPrelude.analyzeResult.overloads;
+            preludeStructDefs = &cachedPrelude.analyzeResult.exportedStructDefs;
+            preludeEnumDefs = &cachedPrelude.analyzeResult.exportedEnumDefs;
+            preludeGenericFns = &cachedPrelude.analyzeResult.genericFns;
 
             // Map all exported symbols from prelude to IR names
-            var exportIter = preludeCompiled.analyzeResult.exports.iterator();
+            var exportIter = cachedPrelude.analyzeResult.exports.iterator();
             while (exportIter.next()) |entry| {
-                if (preludeCompiled.irResult.varNames.get(entry.key_ptr.*)) |irName| {
+                if (cachedPrelude.irResult.varNames.get(entry.key_ptr.*)) |irName| {
                     try importedVarNames.put(entry.key_ptr.*, irName);
                 }
             }
@@ -282,7 +376,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
 
     std.debug.print("Analyzing\n", .{});
 
-    var analyzeResult = try Analyzer.analyzeWithPrelude(module, allocator, &depAnalyzeResults, preludeExports, preludeOverloads, preludeStructDefs, preludeEnumDefs);
+    var analyzeResult = try Analyzer.analyzeWithPrelude(module, allocator, &depAnalyzeResults, preludeExports, preludeOverloads, preludeStructDefs, preludeEnumDefs, preludeGenericFns);
     defer analyzeResult.deinit(allocator);
 
     for (analyzeResult.errors) |e| {
@@ -298,7 +392,12 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
             &analyzeResult.fieldIndices,
             &analyzeResult.enumInits,
             &analyzeResult.derefTypes,
+            &analyzeResult.indexElemTypes,
+            analyzeResult.monomorphizedFunctions.items,
+            &analyzeResult.structInitResolutions,
             &importedVarNames,
+            &analyzeResult.monomorphizedEnums,
+            &analyzeResult.matchEnumNames,
         );
         defer entryIrResult.deinit(allocator);
 
@@ -309,7 +408,24 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
 
         if (args.dumpIr or args.run or args.outputPath != null) {
             std.debug.print("Generating llvm\n", .{});
-            const llvmModule = try llvm.generateLLVMModule(&mergedIr, allocator);
+
+            // Build struct field types map from all struct defs
+            var depStructDefPtrs = try std.ArrayList(*const std.StringHashMap(Analyzer.StructDef)).initCapacity(allocator, depCompiled.items.len);
+            defer depStructDefPtrs.deinit(allocator);
+            for (depCompiled.items) |dep| {
+                try depStructDefPtrs.append(allocator, &dep.analyzeResult.structDefs);
+                try depStructDefPtrs.append(allocator, &dep.analyzeResult.exportedStructDefs);
+            }
+            var structFieldTypes = try buildStructFieldTypes(allocator, &analyzeResult.structDefs, depStructDefPtrs.items);
+            defer {
+                var sfIter = structFieldTypes.iterator();
+                while (sfIter.next()) |entry| {
+                    allocator.free(entry.value_ptr.*);
+                }
+                structFieldTypes.deinit();
+            }
+
+            const llvmModule = try llvm.generateLLVMModule(&mergedIr, allocator, &structFieldTypes);
 
             if (args.dumpIr) {
                 const irStr = core.LLVMPrintModuleToString(llvmModule);
@@ -336,7 +452,11 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
                 defer allocator.free(ccResult.stdout);
                 defer allocator.free(ccResult.stderr);
 
-                if (ccResult.term.Exited != 0) {
+                const linkFailed = switch (ccResult.term) {
+                    .Exited => |code| code != 0,
+                    else => true,
+                };
+                if (linkFailed) {
                     std.debug.print("Linker error:\n{s}\n", .{ccResult.stderr});
                     return;
                 }

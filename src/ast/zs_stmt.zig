@@ -29,7 +29,16 @@ pub const ZSStmt = union(ZSStmtType) {
                 if (self.function.body) |*b| {
                     b.deinit(allocator);
                 }
+                for (self.function.args) |*arg| {
+                    if (arg.type) |*t| {
+                        t.deinit(allocator);
+                    }
+                }
+                if (self.function.ret) |*r| {
+                    r.deinit(allocator);
+                }
                 allocator.free(self.function.args);
+                allocator.free(self.function.type_params);
             },
             .reassign => self.reassign.deinit(allocator),
             .struct_decl => self.struct_decl.deinit(allocator),

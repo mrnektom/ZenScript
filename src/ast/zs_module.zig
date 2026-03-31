@@ -9,6 +9,7 @@ pub const ZSModule = struct {
     ast: []ast.ZSAstNode,
     filename: []const u8,
     source: []const u8,
+    allocatedStrings: [][]const u8,
 
     pub fn deinit(self: *const ZSModule, allocator: std.mem.Allocator) void {
         for (self.ast) |node| {
@@ -16,6 +17,10 @@ pub const ZSModule = struct {
         }
         allocator.free(self.ast);
         allocator.free(self.deps);
+        for (self.allocatedStrings) |s| {
+            allocator.free(s);
+        }
+        allocator.free(self.allocatedStrings);
     }
 };
 

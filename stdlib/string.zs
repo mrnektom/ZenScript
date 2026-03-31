@@ -1,1 +1,5 @@
-export struct String { len: number, data: Pointer<number> }
+
+export struct String {
+    len: number,
+    data: Pointer<number>
+}

@@ -9,6 +9,7 @@ pub const ReassignTarget = union(enum) {
 pub const IndexTarget = struct {
     subject_name: []const u8,
     index: Expr,
+    startPos: usize,
 };
 
 target: ReassignTarget,
