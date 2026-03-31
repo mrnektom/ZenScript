@@ -220,6 +220,24 @@ fn generateCallOrIntrinsic(self: *Self, call: ast.expr.ZSCall) Error![]const u8 
             } });
             return resultName;
         }
+        if (std.mem.eql(u8, name, "alloc") and call.arguments.len == 1) {
+            const sizeOperand = try self.generateExpr(call.arguments[0]);
+            const resultName = try self.generateName();
+            try self.instructions.append(self.allocator, ir.ZSIR{ .alloc_op = .{
+                .resultName = resultName,
+                .sizeOperand = sizeOperand,
+            } });
+            return resultName;
+        }
+        if (std.mem.eql(u8, name, "free") and call.arguments.len == 2) {
+            const pointer = try self.generateExpr(call.arguments[0]);
+            const sizeOperand = try self.generateExpr(call.arguments[1]);
+            try self.instructions.append(self.allocator, ir.ZSIR{ .free_op = .{
+                .pointer = pointer,
+                .sizeOperand = sizeOperand,
+            } });
+            return "";
+        }
     }
     return self.generateCall(call);
 }
@@ -292,8 +310,29 @@ fn generateReassign(self: *Self, reassign: ast.stmt.ZSReassign) ![]const u8 {
                 },
             );
         },
+        .field => |f| {
+            const subjectName = resolveFieldTargetSubject(&f, self);
+            try self.instructions.append(
+                self.allocator,
+                ir.ZSIR{
+                    .field_store = ir.ZSIRFieldStore{
+                        .subject = subjectName,
+                        .field_name = f.field_name,
+                        .value = irName,
+                    },
+                },
+            );
+        },
     }
     return irName;
+}
+
+fn resolveFieldTargetSubject(f: *const ast.stmt.ZSReassign.FieldTarget, self: *Self) []const u8 {
+    switch (f.subject.*) {
+        .name => |n| return self.varNames.get(n) orelse n,
+        .field => |*inner| return resolveFieldTargetSubject(inner, self),
+        .index => |idx| return self.varNames.get(idx.subject_name) orelse idx.subject_name,
+    }
 }
 
 fn generateFunction(self: *Self, func: ast.stmt.ZSFn) ![]const u8 {
@@ -854,25 +893,25 @@ fn generateMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error![]const u8 {
     var irArms = try self.allocator.alloc(ir.ZSIRMatchArm, me.arms.len);
 
     for (me.arms, 0..) |arm, i| {
-        // Find tag and payload type for this variant — search by base enum name or mangled name
+        // Resolve variant tag and payload type for enum patterns
         var variantTag: u32 = 0;
         var variantPayloadType: ?[]const u8 = null;
-        var matchTagFound = false;
-        for (self.topLevelInstructions.items) |inst| {
-            if (inst == .enum_decl and std.mem.eql(u8, inst.enum_decl.name, enumName)) {
-                for (inst.enum_decl.variants) |v| {
-                    if (std.mem.eql(u8, v.name, arm.variant_name)) {
-                        variantTag = v.tag;
-                        variantPayloadType = v.payloadType;
-                        matchTagFound = true;
+        switch (arm.pattern) {
+            .enum_variant => |ev| {
+                for (self.topLevelInstructions.items) |inst| {
+                    if (inst == .enum_decl and std.mem.eql(u8, inst.enum_decl.name, enumName)) {
+                        for (inst.enum_decl.variants) |v| {
+                            if (std.mem.eql(u8, v.name, ev.variant_name)) {
+                                variantTag = v.tag;
+                                variantPayloadType = v.payloadType;
+                                break;
+                            }
+                        }
                         break;
                     }
                 }
-                break;
-            }
-        }
-        if (!matchTagFound) {
-            std.debug.print("Warning: match variant '{s}.{s}' not found in IR\n", .{ arm.enum_name, arm.variant_name });
+            },
+            else => {},
         }
 
         // Generate body instructions into a separate list
@@ -896,27 +935,60 @@ fn generateMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error![]const u8 {
             self.varNames = outerVarNames;
         }
 
-        // If there's a binding, add it to varNames pointing to a generated name
-        // The codegen will extract the payload and store it with this name
+        // If there's a binding (enum variant), add it to varNames
         var bindingIrName: ?[]const u8 = null;
-        if (arm.binding) |binding| {
-            bindingIrName = try self.generateName();
-            try self.varNames.put(binding, bindingIrName.?);
+        if (arm.pattern == .enum_variant) {
+            if (arm.pattern.enum_variant.binding) |binding| {
+                bindingIrName = try self.generateName();
+                try self.varNames.put(binding, bindingIrName.?);
+            }
         }
 
         const armResult = try self.generateExpr(arm.body.*);
         self.instructions = outerInstructions;
-        // Discard arm scope — restores outer varNames
         self.varNames.deinit();
         self.varNames = outerVarNames;
 
+        const patternKind: ir.ZSIRMatchPatternKind = switch (arm.pattern) {
+            .enum_variant => .variant_tag,
+            .number_literal => .number_literal,
+            .boolean_literal => .boolean_literal,
+            .char_literal => .char_literal,
+            .string_literal => .string_literal,
+            .struct_destructure => .struct_destructure,
+        };
+        const literalValue: []const u8 = switch (arm.pattern) {
+            .number_literal => |v| v,
+            .string_literal => |v| v,
+            .boolean_literal => |v| if (v) "true" else "false",
+            .char_literal => |v| try std.fmt.allocPrint(self.allocator, "{c}", .{v}),
+            else => "",
+        };
+
         irArms[i] = .{
+            .patternKind = patternKind,
             .variantTag = variantTag,
+            .literalValue = literalValue,
             .binding = bindingIrName,
             .bindingType = variantPayloadType,
             .body = try self.allocator.dupe(ir.ZSIR, bodyInstructions.items),
             .resultName = if (armResult.len > 0) armResult else null,
         };
+    }
+
+    var elseBody: ?[]ir.ZSIR = null;
+    var elseResultName: ?[]const u8 = null;
+    if (me.has_else) {
+        if (me.else_body) |eb| {
+            var elseInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
+            defer elseInstructions.deinit(self.allocator);
+            const outerInstructions = self.instructions;
+            self.instructions = &elseInstructions;
+            const elseResult = try self.generateExpr(eb.*);
+            self.instructions = outerInstructions;
+            elseBody = try self.allocator.dupe(ir.ZSIR, elseInstructions.items);
+            elseResultName = if (elseResult.len > 0) elseResult else null;
+        }
     }
 
     const resultName = try self.generateName();
@@ -925,6 +997,9 @@ fn generateMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error![]const u8 {
         .subject = subjectName,
         .enumName = enumName,
         .arms = irArms,
+        .has_else = me.has_else,
+        .else_body = elseBody,
+        .else_result_name = elseResultName,
     } });
     return resultName;
 }

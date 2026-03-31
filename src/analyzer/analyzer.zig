@@ -781,6 +781,39 @@ fn analyzeReassign(self: *Self, reassign: ast.stmt.ZSReassign) !void {
             }
             _ = try self.analyzeExpr(idx.index);
         },
+        .field => |f| {
+            try self.analyzeReassignFieldTarget(f);
+        },
+    }
+}
+
+fn analyzeReassignFieldTarget(self: *Self, f: ast.stmt.ZSReassign.FieldTarget) !void {
+    switch (f.subject.*) {
+        .name => |subjectName| {
+            if (self.tableStack.get(subjectName)) |sym| {
+                switch (sym.signature) {
+                    .struct_type => |st| {
+                        var found = false;
+                        for (st.fields) |field| {
+                            if (std.mem.eql(u8, field.name, f.field_name)) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            try self.recordErrorAt(f.startPos, f.startPos + f.field_name.len, "Unknown struct field");
+                        }
+                    },
+                    else => {
+                        try self.recordErrorAt(f.startPos, f.startPos + f.field_name.len, "Field access on non-struct type");
+                    },
+                }
+            } else {
+                try self.recordErrorAt(f.startPos, f.startPos + f.field_name.len, "Reference not found");
+            }
+        },
+        .field => |inner| try self.analyzeReassignFieldTarget(inner),
+        .index => {},
     }
 }
 
@@ -891,6 +924,29 @@ fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
             };
             try self.derefTypes.put(call.startPos, typeToString(resultType));
             return resultType;
+        }
+        if (std.mem.eql(u8, name, "alloc")) {
+            if (call.arguments.len != 1) {
+                try self.recordError(call, "alloc() expects exactly 1 argument");
+                return Symbol.ZSType.unknown;
+            }
+            _ = try self.analyzeExpr(call.arguments[0]);
+            const innerPtr = try self.allocator.create(Symbol.ZSType);
+            innerPtr.* = Symbol.ZSType.number;
+            try self.allocatedTypes.append(self.allocator, innerPtr);
+            return Symbol.ZSType{ .pointer = innerPtr };
+        }
+        if (std.mem.eql(u8, name, "free")) {
+            if (call.arguments.len != 2) {
+                try self.recordError(call, "free() expects exactly 2 arguments");
+                return Symbol.ZSType.unknown;
+            }
+            const ptrType = try self.analyzeExpr(call.arguments[0]);
+            _ = try self.analyzeExpr(call.arguments[1]);
+            if (ptrType != .pointer) {
+                try self.recordError(call, "free() first argument must be a pointer");
+            }
+            return Symbol.ZSType.unknown;
         }
     }
 
@@ -1699,13 +1755,15 @@ fn instantiateEnumFromResolved(self: *Self, ed: EnumDef, resolvedTypeArgs: []con
 fn analyzeMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error!Symbol.ZSType {
     const subjectType = try self.analyzeExpr(me.subject.*);
 
-    // Subject must be an enum type
-    if (subjectType != .enum_type) {
-        try self.recordError(me, "Match subject must be an enum type");
+    // For enum patterns, subject must be an enum type
+    const isEnumMatch = me.arms.len > 0 and me.arms[0].pattern == .enum_variant;
+    if (isEnumMatch and subjectType != .enum_type) {
+        try self.recordError(me, "Match subject must be an enum type for enum patterns");
         return Symbol.ZSType.unknown;
     }
 
-    const enumType = subjectType.enum_type;
+    const enumTypeOpt: ?sig.ZSEnumType = if (subjectType == .enum_type) subjectType.enum_type else null;
+    const enumType = enumTypeOpt orelse sig.ZSEnumType{ .name = "", .variants = @as([]sig.ZSEnumVariant, &.{}), .type_args = @as([]const Symbol.ZSType, &.{}) };
     var resultType: Symbol.ZSType = .unknown;
 
     // Record the resolved enum name for IR gen (uses mangled name for generic enums)
@@ -1721,35 +1779,61 @@ fn analyzeMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error!Symbol.ZSType {
     defer coveredVariants.deinit();
 
     for (me.arms) |arm| {
-        // Verify the variant belongs to the enum
-        var foundVariant: ?sig.ZSEnumVariant = null;
-        for (enumType.variants) |v| {
-            if (std.mem.eql(u8, v.name, arm.variant_name)) {
-                foundVariant = v;
-                break;
-            }
-        }
-
-        if (foundVariant == null) {
-            try self.recordError(me, "Unknown variant in match arm");
-            continue;
-        }
-
-        const variant = foundVariant.?;
-        try coveredVariants.put(arm.variant_name, {});
-
-        // Create a scope for the arm with the binding
         var armScope = SymbolTable.init(self.allocator);
         defer armScope.deinit();
         try self.tableStack.enterScope(&armScope);
 
-        if (arm.binding) |binding| {
-            const bindingType = variant.payload_type orelse Symbol.ZSType.unknown;
-            try self.tableStack.put(.{
-                .name = binding,
-                .assignable = false,
-                .signature = bindingType,
-            });
+        switch (arm.pattern) {
+            .enum_variant => |ev| {
+                // Verify the variant belongs to the enum
+                var foundVariant: ?sig.ZSEnumVariant = null;
+                for (enumType.variants) |v| {
+                    if (std.mem.eql(u8, v.name, ev.variant_name)) {
+                        foundVariant = v;
+                        break;
+                    }
+                }
+                if (foundVariant == null) {
+                    try self.recordError(me, "Unknown variant in match arm");
+                    _ = try self.tableStack.exitScope();
+                    continue;
+                }
+                const variant = foundVariant.?;
+                try coveredVariants.put(ev.variant_name, {});
+                if (ev.binding) |binding| {
+                    const bindingType = variant.payload_type orelse Symbol.ZSType.unknown;
+                    try self.tableStack.put(.{
+                        .name = binding,
+                        .assignable = false,
+                        .signature = bindingType,
+                    });
+                }
+            },
+            .number_literal => {},
+            .boolean_literal => {},
+            .char_literal => {},
+            .string_literal => {},
+            .struct_destructure => |sd| {
+                if (subjectType == .struct_type) {
+                    const st = subjectType.struct_type;
+                    for (sd.fields) |fp| {
+                        var fieldType = Symbol.ZSType.unknown;
+                        for (st.fields) |sf| {
+                            if (std.mem.eql(u8, sf.name, fp.name)) {
+                                fieldType = sf.type;
+                                break;
+                            }
+                        }
+                        if (fp.binding_name) |bn| {
+                            try self.tableStack.put(.{
+                                .name = bn,
+                                .assignable = false,
+                                .signature = fieldType,
+                            });
+                        }
+                    }
+                }
+            },
         }
 
         const armType = try self.analyzeExpr(arm.body.*);
@@ -1760,12 +1844,20 @@ fn analyzeMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error!Symbol.ZSType {
         }
     }
 
-    // Exhaustiveness check: all variants must be covered
-    for (enumType.variants) |v| {
-        if (!coveredVariants.contains(v.name)) {
-            const msg = try std.fmt.allocPrint(self.allocator, "Match is not exhaustive: missing variant '{s}'", .{v.name});
-            try self.allocatedStrings.append(self.allocator, msg);
-            try self.recordError(me, msg);
+    // Analyze else body if present
+    if (me.has_else) {
+        if (me.else_body) |eb| {
+            const elseType = try self.analyzeExpr(eb.*);
+            if (resultType == .unknown) resultType = elseType;
+        }
+    } else {
+        // Exhaustiveness check: all variants must be covered (only when no else)
+        for (enumType.variants) |v| {
+            if (!coveredVariants.contains(v.name)) {
+                const msg = try std.fmt.allocPrint(self.allocator, "Match is not exhaustive: missing variant '{s}'", .{v.name});
+                try self.allocatedStrings.append(self.allocator, msg);
+                try self.recordError(me, msg);
+            }
         }
     }
 

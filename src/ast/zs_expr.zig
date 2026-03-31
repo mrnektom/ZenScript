@@ -322,16 +322,42 @@ pub const ZSEnumInit = struct {
     }
 };
 
-pub const ZSMatchArm = struct {
+pub const ZSEnumVariantPattern = struct {
     enum_name: []const u8,
     variant_name: []const u8,
     binding: ?[]const u8,
+};
+
+pub const ZSStructFieldPattern = struct {
+    name: []const u8,
+    binding_name: ?[]const u8,
+    value_pattern: ?*ZSMatchArmPattern,
+};
+
+pub const ZSStructDestructurePattern = struct {
+    struct_name: []const u8,
+    fields: []ZSStructFieldPattern,
+};
+
+pub const ZSMatchArmPattern = union(enum) {
+    enum_variant: ZSEnumVariantPattern,
+    number_literal: []const u8,
+    boolean_literal: bool,
+    char_literal: u8,
+    string_literal: []const u8,
+    struct_destructure: ZSStructDestructurePattern,
+};
+
+pub const ZSMatchArm = struct {
+    pattern: ZSMatchArmPattern,
     body: *ZSExpr,
 };
 
 pub const ZSMatchExpr = struct {
     subject: *ZSExpr,
     arms: []ZSMatchArm,
+    has_else: bool = false,
+    else_body: ?*ZSExpr = null,
     startPos: usize,
     endPos: usize,
 
@@ -343,6 +369,10 @@ pub const ZSMatchExpr = struct {
             allocator.destroy(arm.body);
         }
         allocator.free(self.arms);
+        if (self.else_body) |eb| {
+            eb.deinit(allocator);
+            allocator.destroy(eb);
+        }
     }
 };
 

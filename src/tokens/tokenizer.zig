@@ -76,6 +76,8 @@ fn eatNumeric(self: *Tokenizer) void {
     while (self.peek()) |char| {
         if (std.ascii.isDigit(char)) {
             self.shift();
+        } else if (char == '.' and self.position + 1 < self.input.len and std.ascii.isDigit(self.input[self.position + 1])) {
+            self.shift(); // consume '.'
         } else {
             break;
         }

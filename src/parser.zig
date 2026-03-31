@@ -259,28 +259,53 @@ fn nextReassign(self: *Self) Error!?ast.stmt.ZSReassign {
     const name = token.value;
     self.shiftToken();
 
-    // Check for indexed assignment: name[index] = expr
-    if (self.checkToken("[")) {
-        self.shiftToken(); // consume '['
-        const indexExpr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
-        try self.expectToken("]");
-        if (self.checkToken("=")) {
+    // Build postfix chain of .field and [index] accesses
+    var target = ast.stmt.ZSReassign.ReassignTarget{ .name = name };
+
+    while (true) {
+        if (self.checkToken(".")) {
             self.shiftToken();
-            const expr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
-            return ast.stmt.ZSReassign{ .target = .{ .index = .{ .subject_name = name, .index = indexExpr, .startPos = token.startPos } }, .expr = expr };
+            const fieldTok = try self.peekToken();
+            if (fieldTok.type != .ident) {
+                self.peekedToken = savedPeeked;
+                self.tokenizer.position = savedPos;
+                self.tokenizer.line = savedLine;
+                return null;
+            }
+            self.shiftToken();
+            const subjectPtr = try self.allocator.create(ast.stmt.ZSReassign.ReassignTarget);
+            subjectPtr.* = target;
+            target = ast.stmt.ZSReassign.ReassignTarget{ .field = .{
+                .subject = subjectPtr,
+                .field_name = fieldTok.value,
+                .startPos = fieldTok.startPos,
+            } };
+        } else if (self.checkToken("[")) {
+            self.shiftToken();
+            const indexExpr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+            try self.expectToken("]");
+            // index store only supported on a plain name for now
+            if (target == .name) {
+                if (self.checkToken("=")) {
+                    self.shiftToken();
+                    const expr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+                    return ast.stmt.ZSReassign{ .target = .{ .index = .{ .subject_name = target.name, .index = indexExpr, .startPos = token.startPos } }, .expr = expr };
+                }
+            }
+            self.peekedToken = savedPeeked;
+            self.tokenizer.position = savedPos;
+            self.tokenizer.line = savedLine;
+            return null;
+        } else {
+            break;
         }
-        // Backtrack
-        self.peekedToken = savedPeeked;
-        self.tokenizer.position = savedPos;
-        self.tokenizer.line = savedLine;
-        return null;
     }
 
     // Check for '='
     if (self.checkToken("=")) {
         self.shiftToken();
         const expr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
-        return ast.stmt.ZSReassign{ .target = .{ .name = name }, .expr = expr };
+        return ast.stmt.ZSReassign{ .target = target, .expr = expr };
     }
 
     // Backtrack — not a reassignment
@@ -1155,20 +1180,118 @@ fn nextMatchExpr(self: *Self) Error!?ast.expr.ZSMatchExpr {
     var arms = try std.ArrayList(ast.expr.ZSMatchArm).initCapacity(self.allocator, 4);
     defer arms.deinit(self.allocator);
 
+    var has_else = false;
+    var else_body: ?*ast.expr.ZSExpr = null;
+
     while (true) {
         if (self.checkToken("}")) break;
 
-        // Parse pattern: EnumName.VariantName or EnumName.VariantName(binding)
-        const enumName = try self.nextIdent();
-        try self.expectToken(".");
-        const variantName = try self.nextIdent();
-
-        var binding: ?[]const u8 = null;
-        if (self.checkToken("(")) {
+        // Check for else wildcard arm
+        if (self.checkToken("else")) {
             self.shiftToken();
-            binding = try self.nextIdent();
-            try self.expectToken(")");
+            try self.expectToken("->");
+            const body = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+            const bodyPtr = try self.allocator.create(ast.expr.ZSExpr);
+            bodyPtr.* = body;
+            has_else = true;
+            else_body = bodyPtr;
+            if (self.checkToken(",")) self.shiftToken();
+            break;
         }
+
+        // Determine pattern kind by peeking at the first token
+        const patToken = try self.peekToken();
+        const pattern: ast.expr.ZSMatchArmPattern = blk: {
+            if (patToken.type == .numeric) {
+                self.shiftToken();
+                break :blk ast.expr.ZSMatchArmPattern{ .number_literal = patToken.value };
+            }
+            if (patToken.type == .string) {
+                self.shiftToken();
+                break :blk ast.expr.ZSMatchArmPattern{ .string_literal = patToken.value };
+            }
+            if (patToken.type == .char_literal) {
+                self.shiftToken();
+                const ch: u8 = if (patToken.value.len > 0) patToken.value[0] else 0;
+                break :blk ast.expr.ZSMatchArmPattern{ .char_literal = ch };
+            }
+            if (std.mem.eql(u8, patToken.value, "true")) {
+                self.shiftToken();
+                break :blk ast.expr.ZSMatchArmPattern{ .boolean_literal = true };
+            }
+            if (std.mem.eql(u8, patToken.value, "false")) {
+                self.shiftToken();
+                break :blk ast.expr.ZSMatchArmPattern{ .boolean_literal = false };
+            }
+            // Peek to disambiguate: ident '{' = struct pattern, ident '.' = enum variant
+            const identName = try self.nextIdent();
+            if (self.checkToken("{")) {
+                self.shiftToken();
+                var fields = try std.ArrayList(ast.expr.ZSStructFieldPattern).initCapacity(self.allocator, 4);
+                defer fields.deinit(self.allocator);
+                while (!self.checkToken("}")) {
+                    const fieldName = try self.nextIdent();
+                    var binding_name: ?[]const u8 = null;
+                    var value_pattern: ?*ast.expr.ZSMatchArmPattern = null;
+                    if (self.checkToken(":")) {
+                        self.shiftToken();
+                        const vpatTok = try self.peekToken();
+                        if (vpatTok.type == .numeric) {
+                            self.shiftToken();
+                            const vp = try self.allocator.create(ast.expr.ZSMatchArmPattern);
+                            vp.* = ast.expr.ZSMatchArmPattern{ .number_literal = vpatTok.value };
+                            value_pattern = vp;
+                        } else if (vpatTok.type == .string) {
+                            self.shiftToken();
+                            const vp = try self.allocator.create(ast.expr.ZSMatchArmPattern);
+                            vp.* = ast.expr.ZSMatchArmPattern{ .string_literal = vpatTok.value };
+                            value_pattern = vp;
+                        } else if (std.mem.eql(u8, vpatTok.value, "true")) {
+                            self.shiftToken();
+                            const vp = try self.allocator.create(ast.expr.ZSMatchArmPattern);
+                            vp.* = ast.expr.ZSMatchArmPattern{ .boolean_literal = true };
+                            value_pattern = vp;
+                        } else if (std.mem.eql(u8, vpatTok.value, "false")) {
+                            self.shiftToken();
+                            const vp = try self.allocator.create(ast.expr.ZSMatchArmPattern);
+                            vp.* = ast.expr.ZSMatchArmPattern{ .boolean_literal = false };
+                            value_pattern = vp;
+                        } else {
+                            // binding alias: Point { x: px, y }
+                            binding_name = try self.nextIdent();
+                        }
+                    } else {
+                        // Short binding: field name is also the binding name
+                        binding_name = fieldName;
+                    }
+                    try fields.append(self.allocator, .{
+                        .name = fieldName,
+                        .binding_name = binding_name,
+                        .value_pattern = value_pattern,
+                    });
+                    if (self.checkToken(",")) self.shiftToken();
+                }
+                try self.expectToken("}");
+                break :blk ast.expr.ZSMatchArmPattern{ .struct_destructure = .{
+                    .struct_name = identName,
+                    .fields = try self.allocator.dupe(ast.expr.ZSStructFieldPattern, fields.items),
+                } };
+            }
+            // Enum variant: EnumName.VariantName or EnumName.VariantName(binding)
+            try self.expectToken(".");
+            const variantName = try self.nextIdent();
+            var binding: ?[]const u8 = null;
+            if (self.checkToken("(")) {
+                self.shiftToken();
+                binding = try self.nextIdent();
+                try self.expectToken(")");
+            }
+            break :blk ast.expr.ZSMatchArmPattern{ .enum_variant = .{
+                .enum_name = identName,
+                .variant_name = variantName,
+                .binding = binding,
+            } };
+        };
 
         try self.expectToken("->");
 
@@ -1177,9 +1300,7 @@ fn nextMatchExpr(self: *Self) Error!?ast.expr.ZSMatchExpr {
         bodyPtr.* = body;
 
         try arms.append(self.allocator, .{
-            .enum_name = enumName,
-            .variant_name = variantName,
-            .binding = binding,
+            .pattern = pattern,
             .body = bodyPtr,
         });
 
@@ -1196,6 +1317,8 @@ fn nextMatchExpr(self: *Self) Error!?ast.expr.ZSMatchExpr {
     return ast.expr.ZSMatchExpr{
         .subject = subjectPtr,
         .arms = try self.allocator.dupe(ast.expr.ZSMatchArm, arms.items),
+        .has_else = has_else,
+        .else_body = else_body,
         .startPos = startToken.startPos,
         .endPos = endToken.endPos,
     };
@@ -1209,42 +1332,44 @@ fn nextType(self: *Self) !?ast.ZSType {
 }
 
 fn nextTypeInner(self: *Self) !ast.ZSType {
-    // Check for array type: [elementType]
-    if (self.checkToken("[")) {
-        self.shiftToken(); // consume '['
-        const elemType = try self.nextTypeInner();
-        try self.expectToken("]");
-        const elemPtr = try self.allocator.create(ast.type_notation.ZSType);
-        elemPtr.* = elemType;
-        return ast.ZSType{ .array = .{ .element_type = elemPtr } };
-    }
-
     const typeName = try self.nextIdent();
 
     // Check for generic type args: Name<T, U>
-    if (self.checkToken("<")) {
-        self.shiftToken();
-        var type_args = try std.ArrayList(ast.type_notation.ZSType).initCapacity(self.allocator, 2);
-        defer type_args.deinit(self.allocator);
+    var baseType: ast.ZSType = blk: {
+        if (self.checkToken("<")) {
+            self.shiftToken();
+            var type_args = try std.ArrayList(ast.type_notation.ZSType).initCapacity(self.allocator, 2);
+            defer type_args.deinit(self.allocator);
 
-        while (true) {
-            const arg = try self.nextTypeInner();
-            try type_args.append(self.allocator, arg);
-            if (self.checkToken(",")) {
-                self.shiftToken();
-                continue;
+            while (true) {
+                const arg = try self.nextTypeInner();
+                try type_args.append(self.allocator, arg);
+                if (self.checkToken(",")) {
+                    self.shiftToken();
+                    continue;
+                }
+                break;
             }
-            break;
-        }
-        try self.expectToken(">");
+            try self.expectToken(">");
 
-        return ast.ZSType{ .generic = .{
-            .name = typeName,
-            .type_args = try self.allocator.dupe(ast.type_notation.ZSType, type_args.items),
-        } };
+            break :blk ast.ZSType{ .generic = .{
+                .name = typeName,
+                .type_args = try self.allocator.dupe(ast.type_notation.ZSType, type_args.items),
+            } };
+        }
+        break :blk ast.ZSType{ .reference = typeName };
+    };
+
+    // Check for postfix array syntax: T[], T[][]
+    while (self.checkToken("[")) {
+        self.shiftToken(); // consume '['
+        try self.expectToken("]");
+        const elemPtr = try self.allocator.create(ast.type_notation.ZSType);
+        elemPtr.* = baseType;
+        baseType = ast.ZSType{ .array = .{ .element_type = elemPtr } };
     }
 
-    return ast.ZSType{ .reference = typeName };
+    return baseType;
 }
 
 fn nextModifiers(self: *Self) Error!ast.stmt.Modifiers {
