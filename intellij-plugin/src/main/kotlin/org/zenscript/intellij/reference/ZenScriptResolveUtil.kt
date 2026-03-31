@@ -226,12 +226,18 @@ object ZenScriptResolveUtil {
     }
 
     fun collectVariantElements(from: PsiElement): List<ZenScriptNamedElement> {
+        val seen = LinkedHashSet<String>()
         val result = mutableListOf<ZenScriptNamedElement>()
+        fun addUnique(element: ZenScriptNamedElement) {
+            val name = element.name ?: return
+            if (seen.add(name)) result.add(element)
+        }
+
         var current: PsiElement? = from.parent
         while (current != null) {
             for (child in current.children) {
                 if (child is ZenScriptNamedElement) {
-                    result.add(child)
+                    addUnique(child)
                 }
             }
             // Check function parameters
@@ -241,35 +247,38 @@ object ZenScriptResolveUtil {
                     for (paramNode in paramList.getChildren(null)) {
                         val param = paramNode.psi
                         if (param is ZenScriptParameter) {
-                            result.add(param)
+                            addUnique(param)
                         }
                     }
                 }
             }
             current = current.parent
         }
-        collectImportedVariantElements(from.containingFile, result)
-        collectPreludeVariantElements(from.project, result)
+        collectImportedVariantElements(from.containingFile, result, seen)
+        collectPreludeVariantElements(from.project, result, seen)
         return result
     }
 
-    fun collectImportedVariantElements(file: PsiFile?, result: MutableList<ZenScriptNamedElement>) {
+    fun collectImportedVariantElements(file: PsiFile?, result: MutableList<ZenScriptNamedElement>, seen: MutableSet<String> = mutableSetOf()) {
         if (file == null) return
         for (child in file.children) {
             when (child) {
                 is ZenScriptImportStatement -> {
                     for (symbol in child.getImportSymbols()) {
-                        result.add(symbol)
+                        val name = symbol.name ?: continue
+                        if (seen.add(name)) result.add(symbol)
                     }
                 }
                 is ZenScriptUseStatement -> {
                     for (symbol in child.getVariantSymbols()) {
-                        result.add(symbol)
+                        val name = symbol.name ?: continue
+                        if (seen.add(name)) result.add(symbol)
                     }
                 }
                 is ZenScriptExportFromStatement -> {
                     for (symbol in child.getImportSymbols()) {
-                        result.add(symbol)
+                        val name = symbol.name ?: continue
+                        if (seen.add(name)) result.add(symbol)
                     }
                 }
             }
@@ -350,16 +359,18 @@ object ZenScriptResolveUtil {
         }
     }
 
-    private fun collectPreludeVariantElements(project: com.intellij.openapi.project.Project, result: MutableList<ZenScriptNamedElement>) {
+    private fun collectPreludeVariantElements(project: com.intellij.openapi.project.Project, result: MutableList<ZenScriptNamedElement>, seen: MutableSet<String> = mutableSetOf()) {
         val preludeFile = project.getService(ZenScriptPreludeService::class.java)
             ?.getPreludeFile() ?: return
         for (child in preludeFile.children) {
             if (child is ZenScriptNamedElement) {
-                result.add(child)
+                val name = child.name ?: continue
+                if (seen.add(name)) result.add(child)
             }
             if (child is ZenScriptExportFromStatement) {
                 for (symbol in child.getImportSymbols()) {
-                    result.add(symbol)
+                    val name = symbol.name ?: continue
+                    if (seen.add(name)) result.add(symbol)
                 }
             }
         }

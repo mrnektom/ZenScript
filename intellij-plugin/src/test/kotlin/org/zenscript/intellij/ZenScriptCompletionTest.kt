@@ -47,7 +47,7 @@ class ZenScriptCompletionTest : BasePlatformTestCase() {
             "main.zs",
             """
             import { get_ten } from "./lib.zs";
-            let x = g<caret>
+            let x = <caret>
             """.trimIndent()
         )
         val lookups = myFixture.completeBasic()

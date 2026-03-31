@@ -18,9 +18,7 @@ class ZenScriptReference(element: ZenScriptReferenceExpression) :
         return ZenScriptResolveUtil.resolveInScope(element, name)
     }
 
-    override fun getVariants(): Array<Any> {
-        return ZenScriptResolveUtil.collectVariants(element).toTypedArray()
-    }
+    override fun getVariants(): Array<Any> = emptyArray()
 
     override fun handleElementRename(newElementName: String): PsiElement {
         element.setName(newElementName)

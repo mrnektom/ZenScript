@@ -49,7 +49,7 @@ export fn print(n: number): void {
 
 }
 
-export fn alloc(size: long): long {
+export fn alloc<T>(size: long): Pointer<T> {
   return __syscall6(9, 0, size, 3, 34, -1, 0)
 }
 
@@ -65,6 +65,7 @@ export fn read_line(): String {
       bytes = bytes - 1
     }
   }
+
   return String { len: bytes, data: ptr(buf) }
 }
 
@@ -95,5 +96,5 @@ export fn substr(s: String, start: number, length: number): String {
   for (let i = 0; i < length; i = i + 1) {
     buf[i] = char_at(s, start + i)
   }
-  return String { len:  }
+  return String { len: length, data: buf }
 }
