@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Always use plan mode (EnterPlanMode) before starting non-trivial tasks. Explore the relevant code first, then present a plan for approval. Ask the user about any non-obvious or ambiguous details before implementing — do not make assumptions about intended behavior, especially around language semantics, type system rules, and error handling strategies.
 
+## Language Specification
+
+**Always read [`SPECIFICATION.md`](SPECIFICATION.md) before implementing or modifying any part of the compiler or IntelliJ plugin.** It is the authoritative reference for syntax, types, operators, and language semantics. When the spec and the code disagree, the spec wins — update the code, not the spec (unless the user explicitly changes the spec).
+
 ## Project Overview
 
 ZenScript is a compiler for a custom programming language, written in Zig. It compiles `.zs` source files through a multi-stage pipeline targeting LLVM. The project also has Node.js bindings via napi.
