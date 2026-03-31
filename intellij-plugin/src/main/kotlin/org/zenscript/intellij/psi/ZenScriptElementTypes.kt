@@ -21,4 +21,6 @@ object ZenScriptElementTypes {
     @JvmField val IMPORT_SYMBOL = ZenScriptElementType("IMPORT_SYMBOL")
     @JvmField val IMPORT_PATH = ZenScriptElementType("IMPORT_PATH")
     @JvmField val RETURN_STATEMENT = ZenScriptElementType("RETURN_STATEMENT")
+    @JvmField val MATCH_EXPRESSION = ZenScriptElementType("MATCH_EXPRESSION")
+    @JvmField val MATCH_ARM = ZenScriptElementType("MATCH_ARM")
 }

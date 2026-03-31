@@ -1,5 +1,9 @@
 package org.zenscript.intellij.reference
 
+import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.roots.ProjectRootManager
+import com.intellij.openapi.vfs.VfsUtilCore
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
@@ -10,7 +14,10 @@ import org.zenscript.intellij.psi.ZenScriptElementTypes
 import org.zenscript.intellij.psi.*
 import org.zenscript.intellij.settings.ZenScriptPreludeService
 
+data class ProjectSymbol(val element: ZenScriptNamedElement, val relativePath: String)
+
 object ZenScriptResolveUtil {
+    private val LOG = Logger.getInstance(ZenScriptResolveUtil::class.java)
     fun resolveInScope(from: PsiElement, name: String): PsiElement? {
         var current: PsiElement? = from.parent
         while (current != null) {
@@ -374,6 +381,83 @@ object ZenScriptResolveUtil {
                 }
             }
         }
+    }
+
+    fun collectProjectExportedSymbols(from: PsiFile, alreadySeen: Set<String>): List<ProjectSymbol> {
+        val project = from.project
+        val currentVFile = from.virtualFile ?: run {
+            LOG.warn("ZenScript project completion: from.virtualFile is null")
+            return emptyList()
+        }
+        val result = mutableListOf<ProjectSymbol>()
+        val psiManager = PsiManager.getInstance(project)
+
+        val roots = ProjectRootManager.getInstance(project).contentRoots
+        LOG.warn("ZenScript project completion: contentRoots count = ${roots.size}, currentFile = ${currentVFile.path}")
+
+        for (root in roots) {
+            LOG.warn("ZenScript project completion: scanning root = ${root.path}")
+            VfsUtilCore.iterateChildrenRecursively(root, null) { vFile ->
+                if (!vFile.isDirectory && vFile.extension == "zs" && vFile != currentVFile) {
+                    LOG.warn("ZenScript project completion: found .zs file = ${vFile.path}")
+                    val relativePath = computeRelativePath(currentVFile, vFile)
+                    if (relativePath != null) {
+                        val psiFile = psiManager.findFile(vFile)
+                        if (psiFile != null) {
+                            for (child in psiFile.children) {
+                                if (child is ZenScriptNamedElement) {
+                                    val name = child.name ?: return@iterateChildrenRecursively true
+                                    if (!alreadySeen.contains(name)) {
+                                        result.add(ProjectSymbol(child, relativePath))
+                                    }
+                                }
+                            }
+                        } else {
+                            LOG.warn("ZenScript project completion: psiManager.findFile returned null for ${vFile.path}")
+                        }
+                    } else {
+                        LOG.warn("ZenScript project completion: computeRelativePath returned null for ${vFile.path}")
+                    }
+                }
+                true
+            }
+        }
+        LOG.warn("ZenScript project completion: total symbols collected = ${result.size}")
+        return result
+    }
+
+    fun collectProjectZsFiles(from: VirtualFile, project: com.intellij.openapi.project.Project): List<Pair<VirtualFile, String>> {
+        val result = mutableListOf<Pair<VirtualFile, String>>()
+        val roots = ProjectRootManager.getInstance(project).contentRoots
+        for (root in roots) {
+            VfsUtilCore.iterateChildrenRecursively(root, null) { vFile ->
+                if (!vFile.isDirectory && vFile.extension == "zs" && vFile != from) {
+                    val rel = computeRelativePath(from, vFile)
+                    if (rel != null) result.add(vFile to rel)
+                }
+                true
+            }
+        }
+        return result
+    }
+
+    fun computeRelativePath(from: VirtualFile, to: VirtualFile): String? {
+        val fromDir = from.parent ?: return null
+        // Try direct relative path (to is under fromDir or its subdirectory)
+        val direct = VfsUtilCore.getRelativePath(to, fromDir)
+        if (direct != null) return "./$direct"
+        // Walk up from fromDir to find a common ancestor
+        var ancestor = fromDir.parent
+        var upCount = 1
+        while (ancestor != null) {
+            val rel = VfsUtilCore.getRelativePath(to, ancestor)
+            if (rel != null) {
+                return "../".repeat(upCount) + rel
+            }
+            ancestor = ancestor.parent
+            upCount++
+        }
+        return null
     }
 
     private fun collectImportedVariants(file: PsiFile?, result: MutableList<String>) {

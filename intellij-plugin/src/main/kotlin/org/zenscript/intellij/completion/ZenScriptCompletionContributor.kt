@@ -3,7 +3,10 @@ package org.zenscript.intellij.completion
 import com.intellij.codeInsight.completion.*
 import com.intellij.codeInsight.lookup.LookupElementBuilder
 import com.intellij.lang.ASTNode
+import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.patterns.PlatformPatterns
+import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
 import com.intellij.psi.TokenType
 import com.intellij.psi.util.PsiTreeUtil
@@ -27,12 +30,13 @@ class ZenScriptCompletionContributor : CompletionContributor() {
 
     private class IdentifierCompletionProvider : CompletionProvider<CompletionParameters>() {
         companion object {
+            private val LOG = Logger.getInstance(IdentifierCompletionProvider::class.java)
             private val KEYWORDS = listOf(
                 "let", "const", "fn", "if", "else", "while", "for", "return",
                 "enum", "struct", "import", "use", "export", "break", "continue",
                 "match", "true", "false", "external", "pub"
             )
-            private val BUILTIN_TYPES = listOf("number", "string", "bool", "void", "char")
+            private val BUILTIN_TYPES = listOf("number", "string", "boolean", "void", "char", "long", "short", "byte")
         }
 
         override fun addCompletions(
@@ -42,6 +46,8 @@ class ZenScriptCompletionContributor : CompletionContributor() {
         ) {
             val position = parameters.position
             val parent = position.parent
+            val originalFile = parameters.originalFile as? ZenScriptFile
+            LOG.warn("ZenScript completion: position=${position::class.simpleName}, parent=${parent::class.simpleName}(${parent.node.elementType})")
 
             when {
                 // 4c. Dot-access completion (member access)
@@ -55,6 +61,11 @@ class ZenScriptCompletionContributor : CompletionContributor() {
                 // 4b. Type annotation completion
                 parent is ZenScriptTypeReferenceElement -> {
                     addTypeCompletions(position, result)
+                    if (originalFile != null) addProjectSymbolCompletions(originalFile, result, typesOnly = true)
+                }
+                // Import symbol completion: import { <caret> } from "./file.zs"
+                parent is ZenScriptImportSymbol && parent.parent is ZenScriptImportStatement -> {
+                    addImportSymbolCompletions(parent.parent as ZenScriptImportStatement, originalFile, result)
                 }
                 // 4e. Use statement variant completion
                 parent is ZenScriptImportSymbol && parent.parent is ZenScriptUseStatement -> {
@@ -62,16 +73,18 @@ class ZenScriptCompletionContributor : CompletionContributor() {
                 }
                 // 4f. Import path completion
                 parent is ZenScriptImportPath -> {
-                    addImportPathCompletions(parent, result)
+                    addImportPathCompletions(parent, originalFile, result)
                 }
                 // 4a. General identifier completion + 4d. Keywords
                 parent is ZenScriptReferenceExpression -> {
                     addIdentifierCompletions(position, result)
+                    if (originalFile != null) addProjectSymbolCompletions(originalFile, result)
                     addKeywordCompletions(result)
                 }
                 // Top-level keyword completion (when typing outside any expression)
                 parent is ZenScriptFile || isTopLevelContext(position) -> {
                     addKeywordCompletions(result)
+                    if (originalFile != null) addProjectSymbolCompletions(originalFile, result)
                 }
             }
         }
@@ -247,12 +260,125 @@ class ZenScriptCompletionContributor : CompletionContributor() {
             }
         }
 
+        // 4g. Project-wide symbol completions with auto-import
+        private fun addProjectSymbolCompletions(
+            file: ZenScriptFile,
+            result: CompletionResultSet,
+            typesOnly: Boolean = false
+        ) {
+            val inScope = ZenScriptResolveUtil.collectVariantElements(file)
+                .mapNotNullTo(HashSet()) { it.name }
+
+            val projectSymbols = ZenScriptResolveUtil.collectProjectExportedSymbols(file, inScope)
+            LOG.warn("ZenScript project completion: projectSymbols count = ${projectSymbols.size}")
+
+            for ((element, path) in projectSymbols) {
+                if (typesOnly && element !is ZenScriptStructDeclaration && element !is ZenScriptEnumDeclaration) continue
+                val name = element.name ?: continue
+                val fileName = path.substringAfterLast("/")
+                val lookup = when (element) {
+                    is ZenScriptFnDeclaration ->
+                        LookupElementBuilder.create(name)
+                            .withIcon(AllIcons.Nodes.Function)
+                            .withTailText("()  $fileName", true)
+                    is ZenScriptStructDeclaration ->
+                        LookupElementBuilder.create(name)
+                            .withIcon(AllIcons.Nodes.Class)
+                            .withTailText("  $fileName", true)
+                    is ZenScriptEnumDeclaration ->
+                        LookupElementBuilder.create(name)
+                            .withIcon(AllIcons.Nodes.Enum)
+                            .withTailText("  $fileName", true)
+                    is ZenScriptVarDeclaration ->
+                        LookupElementBuilder.create(name)
+                            .withIcon(AllIcons.Nodes.Variable)
+                            .withTailText("  $fileName", true)
+                    else -> LookupElementBuilder.create(name).withTailText("  $fileName", true)
+                }.withInsertHandler { context, _ ->
+                    addImportIfMissing(
+                        context.file as? ZenScriptFile ?: return@withInsertHandler,
+                        name, path
+                    )
+                }
+                result.addElement(lookup)
+            }
+        }
+
+        private fun addImportIfMissing(file: ZenScriptFile, symbolName: String, path: String) {
+            // Skip if already imported
+            for (child in file.children) {
+                if (child is ZenScriptImportStatement) {
+                    val stmtPath = child.getPath() ?: continue
+                    if (stmtPath == path) {
+                        for (sym in child.getImportSymbols()) {
+                            if (sym.getOriginalName() == symbolName) return
+                        }
+                    }
+                }
+            }
+
+            // Find insertion point: after the last import statement, or at top
+            var insertOffset = 0
+            var hasImports = false
+            for (child in file.children) {
+                if (child is ZenScriptImportStatement) {
+                    insertOffset = child.textRange.endOffset
+                    hasImports = true
+                }
+            }
+
+            val importLine = "import { $symbolName } from \"$path\""
+            val project = file.project
+            WriteCommandAction.runWriteCommandAction(project, "Add import", null, Runnable {
+                val document = PsiDocumentManager.getInstance(project).getDocument(file)
+                if (document != null) {
+                    if (!hasImports) {
+                        document.insertString(0, "$importLine\n")
+                    } else {
+                        document.insertString(insertOffset, "\n$importLine")
+                    }
+                    PsiDocumentManager.getInstance(project).commitDocument(document)
+                }
+            }, file)
+        }
+
         // 4d. Keyword completions
         private fun addKeywordCompletions(result: CompletionResultSet) {
             for (keyword in KEYWORDS) {
                 result.addElement(
                     LookupElementBuilder.create(keyword).bold()
                 )
+            }
+        }
+
+        // Import symbol completions: symbols exported from the target file
+        private fun addImportSymbolCompletions(
+            importStmt: ZenScriptImportStatement,
+            contextFile: ZenScriptFile?,
+            result: CompletionResultSet
+        ) {
+            val path = importStmt.getPath() ?: return
+            // Use originalFile as context so resolveImportPath can find the directory via virtualFile
+            val context: PsiElement = contextFile ?: importStmt
+            val targetFile = ZenScriptResolveUtil.resolveImportPath(context, path) ?: return
+            val alreadyImported = importStmt.getImportSymbols().mapNotNullTo(HashSet()) { it.getOriginalName() }
+            for (child in targetFile.children) {
+                if (child is ZenScriptNamedElement) {
+                    val name = child.name ?: continue
+                    if (name in alreadyImported) continue
+                    val lookup = when (child) {
+                        is ZenScriptFnDeclaration -> LookupElementBuilder.create(name)
+                            .withIcon(AllIcons.Nodes.Function).withTailText("()", true)
+                        is ZenScriptStructDeclaration -> LookupElementBuilder.create(name)
+                            .withIcon(AllIcons.Nodes.Class)
+                        is ZenScriptEnumDeclaration -> LookupElementBuilder.create(name)
+                            .withIcon(AllIcons.Nodes.Enum)
+                        is ZenScriptVarDeclaration -> LookupElementBuilder.create(name)
+                            .withIcon(AllIcons.Nodes.Variable)
+                        else -> LookupElementBuilder.create(name)
+                    }
+                    result.addElement(lookup)
+                }
             }
         }
 
@@ -272,16 +398,30 @@ class ZenScriptCompletionContributor : CompletionContributor() {
         }
 
         // 4f. Import path completions
-        private fun addImportPathCompletions(importPath: ZenScriptImportPath, result: CompletionResultSet) {
-            val containingFile = importPath.containingFile?.virtualFile ?: return
-            val dir = containingFile.parent ?: return
-            for (child in dir.children) {
-                if (child.extension == "zs" && child != containingFile) {
-                    result.addElement(
-                        LookupElementBuilder.create("./${child.name}")
-                            .withIcon(AllIcons.FileTypes.Any_type)
-                    )
-                }
+        private fun addImportPathCompletions(
+            importPath: ZenScriptImportPath,
+            originalFile: ZenScriptFile?,
+            result: CompletionResultSet
+        ) {
+            val currentVFile = originalFile?.virtualFile ?: return
+            val zsFiles = ZenScriptResolveUtil.collectProjectZsFiles(currentVFile, importPath.project)
+            for ((_, relativePath) in zsFiles) {
+                result.addElement(
+                    LookupElementBuilder.create(relativePath)
+                        .withIcon(AllIcons.FileTypes.Any_type)
+                        .withInsertHandler { ctx, _ ->
+                            // Replace the entire content between the quotes
+                            val docText = ctx.document.charsSequence
+                            var openQuote = ctx.startOffset - 1
+                            while (openQuote >= 0 && docText[openQuote] != '"') openQuote--
+                            var closeQuote = ctx.tailOffset
+                            while (closeQuote < docText.length && docText[closeQuote] != '"') closeQuote++
+                            if (openQuote >= 0 && closeQuote < docText.length) {
+                                ctx.document.replaceString(openQuote + 1, closeQuote, relativePath)
+                                ctx.editor.caretModel.moveToOffset(openQuote + 1 + relativePath.length)
+                            }
+                        }
+                )
             }
         }
     }

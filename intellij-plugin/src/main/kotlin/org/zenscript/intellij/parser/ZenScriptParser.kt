@@ -162,6 +162,9 @@ class ZenScriptParser : PsiParser {
         } else {
             b.error("Expected enum name")
         }
+        if (b.tokenType == ZenScriptTokenTypes.LT) {
+            skipGenericParams(b)
+        }
         if (b.tokenType == ZenScriptTokenTypes.LBRACE) {
             parseEnumBody(b)
         }
@@ -249,10 +252,6 @@ class ZenScriptParser : PsiParser {
 
     private fun parseTypeReference(b: PsiBuilder) {
         val marker = b.mark()
-        // Handle pointer types: *TypeName
-        if (b.tokenType == ZenScriptTokenTypes.STAR) {
-            b.advanceLexer()
-        }
         if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
             b.advanceLexer()
         } else if (b.tokenType == ZenScriptTokenTypes.CHAR_KW) {
@@ -265,6 +264,15 @@ class ZenScriptParser : PsiParser {
         // Optional generic args <T, U>
         if (b.tokenType == ZenScriptTokenTypes.LT) {
             skipGenericParams(b)
+        }
+        // Optional array suffix: T[]
+        if (b.tokenType == ZenScriptTokenTypes.LBRACKET) {
+            b.advanceLexer() // eat [
+            if (b.tokenType == ZenScriptTokenTypes.RBRACKET) {
+                b.advanceLexer() // eat ]
+            } else {
+                b.error("Expected ']'")
+            }
         }
         marker.done(ZenScriptElementTypes.TYPE_REFERENCE)
     }
@@ -588,6 +596,9 @@ class ZenScriptParser : PsiParser {
             ZenScriptTokenTypes.LBRACKET -> {
                 skipBracketContent(b)
             }
+            ZenScriptTokenTypes.LBRACE -> {
+                parseBlock(b)
+            }
             ZenScriptTokenTypes.MATCH -> {
                 parseMatchExpression(b)
             }
@@ -654,10 +665,64 @@ class ZenScriptParser : PsiParser {
     }
 
     private fun parseMatchExpression(b: PsiBuilder) {
+        val marker = b.mark()
         b.advanceLexer() // eat match
         parseExpression(b) // subject
         if (b.tokenType == ZenScriptTokenTypes.LBRACE) {
-            skipBraceContent(b)
+            b.advanceLexer() // eat {
+            while (!b.eof() && b.tokenType != ZenScriptTokenTypes.RBRACE) {
+                val armMarker = b.mark()
+                parseMatchPattern(b)
+                if (b.tokenType == ZenScriptTokenTypes.ARROW) {
+                    b.advanceLexer() // eat ->
+                    parseExpression(b)
+                } else {
+                    b.error("Expected '->'")
+                }
+                if (b.tokenType == ZenScriptTokenTypes.COMMA) b.advanceLexer()
+                armMarker.done(ZenScriptElementTypes.MATCH_ARM)
+            }
+            if (b.tokenType == ZenScriptTokenTypes.RBRACE) b.advanceLexer()
+        }
+        marker.done(ZenScriptElementTypes.MATCH_EXPRESSION)
+    }
+
+    private fun parseMatchPattern(b: PsiBuilder) {
+        when (b.tokenType) {
+            ZenScriptTokenTypes.ELSE -> b.advanceLexer()
+            ZenScriptTokenTypes.NUMBER_LITERAL,
+            ZenScriptTokenTypes.STRING_LITERAL,
+            ZenScriptTokenTypes.CHAR_LITERAL,
+            ZenScriptTokenTypes.TRUE,
+            ZenScriptTokenTypes.FALSE -> b.advanceLexer()
+            ZenScriptTokenTypes.IDENTIFIER -> {
+                val nameMarker = b.mark()
+                b.advanceLexer() // eat name
+                nameMarker.done(ZenScriptElementTypes.REFERENCE_EXPRESSION)
+                when (b.tokenType) {
+                    ZenScriptTokenTypes.DOT -> {
+                        // EnumName.Variant or EnumName.Variant(bindings)
+                        b.advanceLexer() // eat .
+                        if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
+                            val varMarker = b.mark()
+                            b.advanceLexer()
+                            varMarker.done(ZenScriptElementTypes.REFERENCE_EXPRESSION)
+                        }
+                        if (b.tokenType == ZenScriptTokenTypes.LPAREN) {
+                            skipParenContent(b)
+                        }
+                    }
+                    ZenScriptTokenTypes.LBRACE -> {
+                        // StructName { field: val, field2 }
+                        skipBraceContent(b)
+                    }
+                    else -> { /* plain binding identifier */ }
+                }
+            }
+            else -> {
+                b.error("Expected match pattern")
+                b.advanceLexer()
+            }
         }
     }
 
