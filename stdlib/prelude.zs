@@ -1,6 +1,6 @@
-export { String } from "./string.zs"
-export { Option } from "./Option.zs"
-import {} from "./arraylist.zs"
+import { Option } from "./Option.zs"
+export { String, plus } from "./string.zs"
+import {List, list_new} from "./arraylist.zs"
 struct Pointer<T> {
     ptr: long
 }
@@ -48,7 +48,6 @@ export fn print(n: number): void {
   __syscall3(1, 1, "\n".data, 1)
 
 }
-
 export fn alloc<T>(size: long): Pointer<T> {
   return __syscall6(9, 0, size, 3, 34, -1, 0)
 }
